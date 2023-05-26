@@ -13,6 +13,8 @@ from megatron.core.pipeline_parallel import p2p_communication
 from megatron.core.enums import ModelType
 from megatron.core.utils import get_attr_wrapped_model, get_model_type
 
+import nvtx
+
 # Types
 Shape = Union[List[int], torch.Size]
 
@@ -213,6 +215,9 @@ def forward_step(forward_step_func,
         timers('forward-compute', log_level=2).start()
 
     fwd_pass_start = datetime.now()
+    rng = nvtx.start_range(message="fwd_step_start", color="blue")
+
+
     unwrap_output_tensor = False
     if not isinstance(input_tensor, list):
         input_tensor = [input_tensor]
@@ -242,6 +247,8 @@ def forward_step(forward_step_func,
         timers('forward-compute').stop()
 
     fwd_pass_end = datetime.now()
+    nvtx.end_range(rng)
+
     # rank = torch.distributed.get_rank()
     # print(f'[Rank {rank}] Forward pass time schedules.py: {(fwd_pass_end - fwd_pass_start).total_seconds()}')
 
@@ -276,6 +283,7 @@ def backward_step(grad_scaler, input_tensor, output_tensor,
         timers('backward-compute', log_level=2).start()
 
     bwd_pass_start = datetime.now()
+    rng = nvtx.start_range(message="bwd_step_start", color="red")
 
     # Retain the grad on the input_tensor.
     unwrap_input_tensor_grad = False
@@ -324,6 +332,7 @@ def backward_step(grad_scaler, input_tensor, output_tensor,
         timers('backward-compute').stop()
 
     bwd_pass_end = datetime.now()
+    nvtx.end_range(rng)
     # rank = torch.distributed.get_rank()
     # print(f'[Rank {rank}] Backward pass time schedules.py: {(bwd_pass_end - bwd_pass_start).total_seconds()}')
 
