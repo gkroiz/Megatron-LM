@@ -242,8 +242,8 @@ def forward_step(forward_step_func,
         timers('forward-compute').stop()
 
     fwd_pass_end = datetime.now()
-    rank = torch.distributed.get_rank()
-    print(f'[Rank {rank}] Forward pass time schedules.py: {(fwd_pass_end - fwd_pass_start).total_seconds()}')
+    # rank = torch.distributed.get_rank()
+    # print(f'[Rank {rank}] Forward pass time schedules.py: {(fwd_pass_end - fwd_pass_start).total_seconds()}')
 
     # If T5 model (or other model with encoder and decoder)
     # and in decoder stack, then send encoder_hidden_state
@@ -324,8 +324,8 @@ def backward_step(grad_scaler, input_tensor, output_tensor,
         timers('backward-compute').stop()
 
     bwd_pass_end = datetime.now()
-    rank = torch.distributed.get_rank()
-    print(f'[Rank {rank}] Backward pass time schedules.py: {(bwd_pass_end - bwd_pass_start).total_seconds()}')
+    # rank = torch.distributed.get_rank()
+    # print(f'[Rank {rank}] Backward pass time schedules.py: {(bwd_pass_end - bwd_pass_start).total_seconds()}')
 
     return input_tensor_grad
 
