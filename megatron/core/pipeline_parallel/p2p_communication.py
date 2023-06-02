@@ -5,6 +5,7 @@ import operator
 from typing import Optional, List, Union, Callable, Tuple
 
 import torch
+import nvtx
 
 from megatron import core
 from megatron.core.parallel_state import (
@@ -424,6 +425,7 @@ def send_forward(output_tensor: torch.Tensor,
     if not core.parallel_state.is_pipeline_last_stage():
         if timers is not None:
             timers('forward-send', log_level=2).start()
+        rng = nvtx.start_range(message="send_forward", color="orange")
         _communicate(
             tensor_send_next=output_tensor,
             tensor_send_prev=None,
@@ -432,6 +434,7 @@ def send_forward(output_tensor: torch.Tensor,
             tensor_shape=None,
             batch_p2p_comm=batch_p2p_comm,
             dtype=None)
+        nvtx.end_range(rng)
         if timers is not None:
             timers('forward-send').stop()
 

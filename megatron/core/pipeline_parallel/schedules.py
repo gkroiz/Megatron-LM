@@ -215,7 +215,7 @@ def forward_step(forward_step_func,
         timers('forward-compute', log_level=2).start()
 
     fwd_pass_start = datetime.now()
-    rng = nvtx.start_range(message="fwd_step_start", color="blue")
+    rng = nvtx.start_range(message="fwd_step", color="blue")
 
 
     unwrap_output_tensor = False
@@ -283,7 +283,7 @@ def backward_step(grad_scaler, input_tensor, output_tensor,
         timers('backward-compute', log_level=2).start()
 
     bwd_pass_start = datetime.now()
-    rng = nvtx.start_range(message="bwd_step_start", color="red")
+    rng = nvtx.start_range(message="bwd_step", color="red")
 
     # Retain the grad on the input_tensor.
     unwrap_input_tensor_grad = False
@@ -1150,7 +1150,9 @@ def forward_backward_pipelining_without_interleaving(*,
     forward_data_store = []
 
     # Run warmup forward passes.
+    warmup_rng = nvtx.start_range(message="fwd_pass_warmup", color="green")
     for i in range(num_warmup_microbatches):
+        warmup_rng = nvtx.start_range(message=f"fwd_pass_warmup: {i}", color="yellow")
         input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
         output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                      input_tensor, forward_data_store,
@@ -1161,6 +1163,8 @@ def forward_backward_pipelining_without_interleaving(*,
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
             deallocate_output_tensor(output_tensor[0], deallocate_pipeline_outputs)
+
+    nvtx.end_range(warmup_rng)
 
     # Before running 1F1B, need to receive first forward tensor.
     # If all microbatches are run in warmup / cooldown phase, then no need to
