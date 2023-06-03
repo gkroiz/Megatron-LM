@@ -1149,10 +1149,16 @@ def forward_backward_pipelining_without_interleaving(*,
         output_tensors = []
     forward_data_store = []
 
+
+    rank = torch.distributed.get_rank()
+
     # Run warmup forward passes.
     warmup_rng = nvtx.start_range(message="fwd_pass_warmup", color="green")
     for i in range(num_warmup_microbatches):
-        nvtx.mark(message=f"fwd_pass_warmup: {i}", color="yellow")
+        if i % 2 == 0:
+            nvtx.mark(message=f"fwd_pass_warmup: {i}, rank: {rank}", color="yellow")
+        else:
+            nvtx.mark(message=f"fwd_pass_warmup: {i}, rank: {rank}", color="orange")
         input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
         output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                      input_tensor, forward_data_store,
