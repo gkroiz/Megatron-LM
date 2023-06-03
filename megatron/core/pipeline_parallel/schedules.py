@@ -1172,7 +1172,7 @@ def forward_backward_pipelining_without_interleaving(*,
     if num_microbatches_remaining > 0:
         input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
 
-    steady_state_rng = nvtx.start_range(message="fwd_pass_warmup", color="green")
+    steady_state_rng = nvtx.start_range(message="fwd_pass_steady_state", color="darkgreen")
     # Run 1F1B in steady state.
     for i in range(num_microbatches_remaining):
         last_iteration = (i == (num_microbatches_remaining - 1))
