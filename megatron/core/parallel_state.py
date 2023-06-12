@@ -51,7 +51,6 @@ _DATA_PARALLEL_GLOBAL_RANKS = None
 _GLOBAL_MEMORY_BUFFER = None
 
 
-
 # TODO (gersonkroiz) Verify this
 def initialize_model_components_parallel(
     parallelization_specs: dict,
@@ -129,24 +128,16 @@ def initialize_model_components_parallel(
     for k in parallelization_specs:
         for i in range(all_num_tensor_model_parallel_groups[k]):
             ranks = range(all_gpu_ranks[k][i * tensor_model_parallel_group_sizes[k]],
-                        all_gpu_ranks[k][((i + 1) * tensor_model_parallel_group_sizes[k])-1]+1)
+                          all_gpu_ranks[k][((i + 1) * tensor_model_parallel_group_sizes[k])-1]+1)
         group = torch.distributed.new_group(ranks)
         if rank in ranks:
             _TENSOR_MODEL_PARALLEL_GROUP = group
 
-    # Build the pipeline model-parallel groups and embedding groups
-    # (first and last rank in each pipeline model-parallel group).
+    # Build the pipeline model-parallel groups
     global _PIPELINE_MODEL_PARALLEL_GROUP
     global _PIPELINE_GLOBAL_RANKS
     assert _PIPELINE_MODEL_PARALLEL_GROUP is None, \
         'pipeline model parallel group is already initialized'
-    global _EMBEDDING_GROUP
-    global _EMBEDDING_GLOBAL_RANKS
-    assert _EMBEDDING_GROUP is None, 'embedding group is already initialized'
-    global _POSITION_EMBEDDING_GROUP
-    global _POSITION_EMBEDDING_GLOBAL_RANKS
-    assert _POSITION_EMBEDDING_GROUP is None, \
-        'position embedding group is already initialized'
     for k in parallelization_specs:
         for i in range(all_num_pipeline_model_parallel_groups[k]):
             ranks = range(all_gpu_ranks[k][i], all_gpu_ranks[k][world_sizes[k]-1]+1, all_num_pipeline_model_parallel_groups[k])
@@ -154,26 +145,43 @@ def initialize_model_components_parallel(
             if rank in ranks:
                 _PIPELINE_MODEL_PARALLEL_GROUP = group
                 _PIPELINE_GLOBAL_RANKS = ranks
-            # Setup embedding group (to exchange gradients between
-            # first and last stages).
-            if len(ranks) > 1:
-                embedding_ranks = [ranks[0], ranks[-1]]
-                position_embedding_ranks = [ranks[0]]
-            else:
-                embedding_ranks = ranks
-                position_embedding_ranks = ranks
 
-            group = torch.distributed.new_group(embedding_ranks)
-            if rank in embedding_ranks:
-                _EMBEDDING_GROUP = group
-            if rank in ranks:
-                _EMBEDDING_GLOBAL_RANKS = embedding_ranks
+    # Build the embedding groups (first and last rank in each pipeline model-parallel group).
+    # The embedding groups are defined based on the entire model, not individual components
+    first_component_name = list(parallelization_specs.keys())[0] 
+    last_component_name = list(parallelization_specs.keys())[-1] 
 
-            group = torch.distributed.new_group(position_embedding_ranks)
-            if rank in position_embedding_ranks:
-                _POSITION_EMBEDDING_GROUP = group
-            if rank in ranks:
-                _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
+    global _EMBEDDING_GROUP
+    global _EMBEDDING_GLOBAL_RANKS
+    assert _EMBEDDING_GROUP is None, 'embedding group is already initialized'
+    global _POSITION_EMBEDDING_GROUP
+    global _POSITION_EMBEDDING_GLOBAL_RANKS
+    assert _POSITION_EMBEDDING_GROUP is None, \
+        'position embedding group is already initialized'
+    for i in range(all_num_pipeline_model_parallel_groups[first_component_name]):
+        ranks = range(all_gpu_ranks[first_component_name][i], 
+                      all_gpu_ranks[last_component_name][world_sizes[last_component_name]-1]+1, 
+                      all_num_pipeline_model_parallel_groups[first_component_name])
+        # Setup embedding group (to exchange gradients between
+        # first and last stages).
+        if len(ranks) > 1:
+            embedding_ranks = [ranks[0], ranks[-1]]
+            position_embedding_ranks = [ranks[0]]
+        else:
+            embedding_ranks = ranks
+            position_embedding_ranks = ranks
+
+        group = torch.distributed.new_group(embedding_ranks)
+        if rank in embedding_ranks:
+            _EMBEDDING_GROUP = group
+        if rank in ranks:
+            _EMBEDDING_GLOBAL_RANKS = embedding_ranks
+
+        group = torch.distributed.new_group(position_embedding_ranks)
+        if rank in position_embedding_ranks:
+            _POSITION_EMBEDDING_GROUP = group
+        if rank in ranks:
+            _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
 
     # Build the FP8 groups.
     global _AMAX_REDUCTION_GROUP
@@ -196,6 +204,25 @@ def initialize_model_components_parallel(
     # put this. If we end up with a more generic initialization of megatron-core
     # we could stick it there
     _set_global_memory_buffer()
+    print(f'{rank}: _TENSOR_MODEL_PARALLEL_GROUP={_TENSOR_MODEL_PARALLEL_GROUP}')
+    print(f'{rank}: _PIPELINE_MODEL_PARALLEL_GROUP={_TENSOR_MODEL_PARALLEL_GROUP}')
+    print(f'{rank}: _MODEL_PARALLEL_GROUP={_MODEL_PARALLEL_GROUP}')
+    print(f'{rank}: _EMBEDDING_GROUP={_EMBEDDING_GROUP}')
+    print(f'{rank}: _POSITION_EMBEDDING_GROUP={_POSITION_EMBEDDING_GROUP}')
+    print(f'{rank}: _DATA_PARALLEL_GROUP={_DATA_PARALLEL_GROUP}')
+    print(f'{rank}: _DATA_PARALLEL_GROUP_GLOO={_DATA_PARALLEL_GROUP_GLOO}')
+    print(f'{rank}: _AMAX_REDUCTION_GROUP={_AMAX_REDUCTION_GROUP}')
+    print(f'{rank}: _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK={_VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK}')
+    print(f'{rank}: _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE={_VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE}')
+    print(f'{rank}: _PIPELINE_MODEL_PARALLEL_SPLIT_RANK={_PIPELINE_MODEL_PARALLEL_SPLIT_RANK}')
+    print(f'{rank}: _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE={_MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE}')
+    print(f'{rank}: _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE={_MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE}')
+    print(f'{rank}: _MPU_TENSOR_MODEL_PARALLEL_RANK={_MPU_TENSOR_MODEL_PARALLEL_RANK}')
+    print(f'{rank}: _MPU_PIPELINE_MODEL_PARALLEL_RANK={_MPU_PIPELINE_MODEL_PARALLEL_RANK}')
+    print(f'{rank}: _EMBEDDING_GLOBAL_RANKS={_EMBEDDING_GLOBAL_RANKS}')
+    print(f'{rank}: _POSITION_EMBEDDING_GLOBAL_RANKS={_POSITION_EMBEDDING_GLOBAL_RANKS}')
+    print(f'{rank}: _PIPELINE_GLOBAL_RANKS={_PIPELINE_GLOBAL_RANKS}')
+    print(f'{rank}: _DATA_PARALLEL_GLOBAL_RANKS={_DATA_PARALLEL_GLOBAL_RANKS}')
     
 
 def initialize_model_parallel(
