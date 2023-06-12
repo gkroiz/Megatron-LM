@@ -51,6 +51,153 @@ _DATA_PARALLEL_GLOBAL_RANKS = None
 _GLOBAL_MEMORY_BUFFER = None
 
 
+
+# TODO (gersonkroiz) Verify this
+def initialize_model_components_parallel(
+    parallelization_specs: dict,
+):
+    """Initialize data parallel groups for component of the model.
+    
+    Arguments:
+        parallelization_specs: (dict, required)
+            contains specifications for initializing the 
+            component parallel groups
+    """
+    assert torch.distributed.is_initialized()
+    world_sizes = {}
+    tensor_model_parallel_group_sizes = {}
+    data_parallel_group_sizes = {}
+    pipeline_model_parallel_group_sizes = {}
+
+    all_num_tensor_model_parallel_groups = {}
+    all_num_pipeline_model_parallel_groups = {}
+    all_num_data_parallel_groups = {}
+    
+    all_data_parallel_group_ranks = {}
+    all_gpu_ranks = {}
+
+    for k in parallelization_specs:
+        world_sizes[k] = len(parallelization_specs[k]["gpu_ranks"])
+        tensor_model_parallel_group_sizes[k] = parallelization_specs[k]["tensor_model_parallel_group_size"]
+        data_parallel_group_sizes[k] = parallelization_specs[k]["data_parallel_group_size"]
+        pipeline_model_parallel_group_sizes[k] = parallelization_specs[k]["pipeline_model_parallel_group_size"]
+        all_num_tensor_model_parallel_groups[k] = world_sizes[k] // tensor_model_parallel_group_sizes[k]
+        all_num_pipeline_model_parallel_groups[k] = world_sizes[k] // pipeline_model_parallel_group_sizes[k]
+        all_num_data_parallel_groups[k] = world_sizes[k] // data_parallel_group_sizes[k]
+        
+        all_data_parallel_group_ranks[k] = []
+        all_gpu_ranks[k] = parallelization_specs[k]['gpu_ranks']
+
+    rank = torch.distributed.get_rank()
+
+    # Build the data-parallel groups.
+    global _DATA_PARALLEL_GROUP
+    global _DATA_PARALLEL_GROUP_GLOO
+    global _DATA_PARALLEL_GLOBAL_RANKS
+    assert _DATA_PARALLEL_GROUP is None, 'data parallel group is already initialized'
+    
+    for k in parallelization_specs:
+        for i in range(pipeline_model_parallel_group_sizes[k]):
+            start_rank = i * all_num_pipeline_model_parallel_groups[k]
+            end_rank = (i + 1) * all_num_pipeline_model_parallel_groups[k]
+            for j in range(tensor_model_parallel_group_sizes[k]):
+                ranks = range(all_gpu_ranks[k][start_rank + j], all_gpu_ranks[k][end_rank-1]+1, tensor_model_parallel_group_sizes[k])
+                all_data_parallel_group_ranks[k].append(list(ranks))
+                group = torch.distributed.new_group(ranks)
+                group_gloo = torch.distributed.new_group(ranks, backend="gloo")
+                if rank in ranks:
+                    # TODO: update this
+                    _DATA_PARALLEL_GROUP = group
+                    _DATA_PARALLEL_GROUP_GLOO = group_gloo
+                    _DATA_PARALLEL_GLOBAL_RANKS = ranks
+
+    # Build the model-parallel groups.
+    global _MODEL_PARALLEL_GROUP
+    assert _MODEL_PARALLEL_GROUP is None, 'model parallel group is already initialized'
+    for k in parallelization_specs:
+        for i in range(data_parallel_group_sizes[k]):
+            ranks = [data_parallel_group_ranks[i]
+                    for data_parallel_group_ranks in all_data_parallel_group_ranks[k]]
+            group = torch.distributed.new_group(ranks)
+            if rank in ranks:
+                _MODEL_PARALLEL_GROUP = group
+
+    # Build the tensor model-parallel groups.
+    global _TENSOR_MODEL_PARALLEL_GROUP
+    assert _TENSOR_MODEL_PARALLEL_GROUP is None, \
+        'tensor model parallel group is already initialized'
+    for k in parallelization_specs:
+        for i in range(all_num_tensor_model_parallel_groups[k]):
+            ranks = range(all_gpu_ranks[k][i * tensor_model_parallel_group_sizes[k]],
+                        all_gpu_ranks[k][((i + 1) * tensor_model_parallel_group_sizes[k])-1]+1)
+        group = torch.distributed.new_group(ranks)
+        if rank in ranks:
+            _TENSOR_MODEL_PARALLEL_GROUP = group
+
+    # Build the pipeline model-parallel groups and embedding groups
+    # (first and last rank in each pipeline model-parallel group).
+    global _PIPELINE_MODEL_PARALLEL_GROUP
+    global _PIPELINE_GLOBAL_RANKS
+    assert _PIPELINE_MODEL_PARALLEL_GROUP is None, \
+        'pipeline model parallel group is already initialized'
+    global _EMBEDDING_GROUP
+    global _EMBEDDING_GLOBAL_RANKS
+    assert _EMBEDDING_GROUP is None, 'embedding group is already initialized'
+    global _POSITION_EMBEDDING_GROUP
+    global _POSITION_EMBEDDING_GLOBAL_RANKS
+    assert _POSITION_EMBEDDING_GROUP is None, \
+        'position embedding group is already initialized'
+    for k in parallelization_specs:
+        for i in range(all_num_pipeline_model_parallel_groups[k]):
+            ranks = range(all_gpu_ranks[k][i], all_gpu_ranks[k][world_sizes[k]-1]+1, all_num_pipeline_model_parallel_groups[k])
+            group = torch.distributed.new_group(ranks)
+            if rank in ranks:
+                _PIPELINE_MODEL_PARALLEL_GROUP = group
+                _PIPELINE_GLOBAL_RANKS = ranks
+            # Setup embedding group (to exchange gradients between
+            # first and last stages).
+            if len(ranks) > 1:
+                embedding_ranks = [ranks[0], ranks[-1]]
+                position_embedding_ranks = [ranks[0]]
+            else:
+                embedding_ranks = ranks
+                position_embedding_ranks = ranks
+
+            group = torch.distributed.new_group(embedding_ranks)
+            if rank in embedding_ranks:
+                _EMBEDDING_GROUP = group
+            if rank in ranks:
+                _EMBEDDING_GLOBAL_RANKS = embedding_ranks
+
+            group = torch.distributed.new_group(position_embedding_ranks)
+            if rank in position_embedding_ranks:
+                _POSITION_EMBEDDING_GROUP = group
+            if rank in ranks:
+                _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
+
+    # Build the FP8 groups.
+    global _AMAX_REDUCTION_GROUP
+    assert _AMAX_REDUCTION_GROUP is None, \
+        'FP8 amax reduction group is already initialized'
+    if use_fp8:
+        for k in parallelization_specs:
+            amax_group_size: int = tensor_model_parallel_group_sizes[k] * data_parallel_group_sizes[k]
+            num_amax_groups: int = world_sizes[k] // amax_group_size
+            for i in range(num_amax_groups):
+                start_rank = i * amax_group_size
+                end_rank = (i + 1) * amax_group_size
+                ranks = range(all_gpu_ranks[k][start_rank], all_gpu_ranks[k][end_rank-1]+1)
+                group = torch.distributed.new_group(ranks)
+                if rank in ranks:
+                    _AMAX_REDUCTION_GROUP = group
+
+    # Initialize global memory buffer
+    # This isn't really "parallel state" but there isn't another good place to
+    # put this. If we end up with a more generic initialization of megatron-core
+    # we could stick it there
+    _set_global_memory_buffer()
+    
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
