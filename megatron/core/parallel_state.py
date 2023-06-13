@@ -22,6 +22,8 @@ _DATA_PARALLEL_GROUP = None
 _DATA_PARALLEL_GROUP_GLOO = None
 # FP8 amax reduction group.
 _AMAX_REDUCTION_GROUP = None
+# Component pipeline group that the current rank belongs to.
+_COMPONENT_PIPELINE_CONNECTOR_GROUP = None
 
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
@@ -86,6 +88,13 @@ def initialize_model_components_parallel(
         
         all_data_parallel_group_ranks[k] = []
         all_gpu_ranks[k] = parallelization_specs[k]['gpu_ranks']
+        
+    for k in parallelization_specs:
+        if world_sizes[k] % (tensor_model_parallel_sizes[k] * pipeline_model_parallel_sizes[k]) != 0:
+            raise RuntimeError(
+                f"component world_size ({world_size[k]}) is not divisible by tensor_model_parallel_size "
+                f"({tensor_model_parallel_size[k]}) x pipeline_model_parallel_size ({pipeline_model_parallel_size[k]})"
+            )
 
     rank = torch.distributed.get_rank()
 
@@ -133,11 +142,14 @@ def initialize_model_components_parallel(
         if rank in ranks:
             _TENSOR_MODEL_PARALLEL_GROUP = group
 
-    # Build the pipeline model-parallel groups
+    # Build the pipeline model-parallel and component pipeline connector groups
     global _PIPELINE_MODEL_PARALLEL_GROUP
     global _PIPELINE_GLOBAL_RANKS
+    global _COMPONENT_PIPELINE_CONNECTOR_GROUP
     assert _PIPELINE_MODEL_PARALLEL_GROUP is None, \
         'pipeline model parallel group is already initialized'
+    assert _COMPONENT_PIPELINE_CONNECTOR_GROUP is None, \
+        'component pipeline connector group is already initialized'
     for k in parallelization_specs:
         for i in range(all_num_pipeline_model_parallel_groups[k]):
             ranks = range(all_gpu_ranks[k][i], all_gpu_ranks[k][world_sizes[k]-1]+1, all_num_pipeline_model_parallel_groups[k])
@@ -145,6 +157,10 @@ def initialize_model_components_parallel(
             if rank in ranks:
                 _PIPELINE_MODEL_PARALLEL_GROUP = group
                 _PIPELINE_GLOBAL_RANKS = ranks
+                if k != list(parallelization_specs.keys())[-1]:
+                    _COMPONENT_PIPELINE_CONNECTOR_GROUP = [ranks[-1], ranks[-1] + all_num_pipeline_model_parallel_groups[k]]
+                else:
+                    _COMPONENT_PIPELINE_CONNECTOR_GROUP = [None]
 
     # Build the embedding groups (first and last rank in each pipeline model-parallel group).
     # The embedding groups are defined based on the entire model, not individual components
@@ -204,25 +220,6 @@ def initialize_model_components_parallel(
     # put this. If we end up with a more generic initialization of megatron-core
     # we could stick it there
     _set_global_memory_buffer()
-    print(f'{rank}: _TENSOR_MODEL_PARALLEL_GROUP={_TENSOR_MODEL_PARALLEL_GROUP}')
-    print(f'{rank}: _PIPELINE_MODEL_PARALLEL_GROUP={_TENSOR_MODEL_PARALLEL_GROUP}')
-    print(f'{rank}: _MODEL_PARALLEL_GROUP={_MODEL_PARALLEL_GROUP}')
-    print(f'{rank}: _EMBEDDING_GROUP={_EMBEDDING_GROUP}')
-    print(f'{rank}: _POSITION_EMBEDDING_GROUP={_POSITION_EMBEDDING_GROUP}')
-    print(f'{rank}: _DATA_PARALLEL_GROUP={_DATA_PARALLEL_GROUP}')
-    print(f'{rank}: _DATA_PARALLEL_GROUP_GLOO={_DATA_PARALLEL_GROUP_GLOO}')
-    print(f'{rank}: _AMAX_REDUCTION_GROUP={_AMAX_REDUCTION_GROUP}')
-    print(f'{rank}: _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK={_VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK}')
-    print(f'{rank}: _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE={_VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE}')
-    print(f'{rank}: _PIPELINE_MODEL_PARALLEL_SPLIT_RANK={_PIPELINE_MODEL_PARALLEL_SPLIT_RANK}')
-    print(f'{rank}: _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE={_MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE}')
-    print(f'{rank}: _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE={_MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE}')
-    print(f'{rank}: _MPU_TENSOR_MODEL_PARALLEL_RANK={_MPU_TENSOR_MODEL_PARALLEL_RANK}')
-    print(f'{rank}: _MPU_PIPELINE_MODEL_PARALLEL_RANK={_MPU_PIPELINE_MODEL_PARALLEL_RANK}')
-    print(f'{rank}: _EMBEDDING_GLOBAL_RANKS={_EMBEDDING_GLOBAL_RANKS}')
-    print(f'{rank}: _POSITION_EMBEDDING_GLOBAL_RANKS={_POSITION_EMBEDDING_GLOBAL_RANKS}')
-    print(f'{rank}: _PIPELINE_GLOBAL_RANKS={_PIPELINE_GLOBAL_RANKS}')
-    print(f'{rank}: _DATA_PARALLEL_GLOBAL_RANKS={_DATA_PARALLEL_GLOBAL_RANKS}')
     
 
 def initialize_model_parallel(
@@ -504,6 +501,12 @@ def get_amax_reduction_group():
     return _AMAX_REDUCTION_GROUP
 
 
+def get_component_pipeline_connector_group():
+    """Get the component pipeline connector group the caller rank belongs to."""
+    assert _COMPONENT_PIPELINE_CONNECTOR_GROUP is not None, \
+        'component pipeline connector group is not initialized'
+    return _COMPONENT_PIPELINE_CONNECTOR_GROUP
+
 def set_tensor_model_parallel_world_size(world_size):
     """Set the tensor model parallel size"""
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
@@ -771,6 +774,8 @@ def destroy_model_parallel():
     _POSITION_EMBEDDING_GROUP = None
     global _AMAX_REDUCTION_GROUP
     _AMAX_REDUCTION_GROUP = None
+    global _COMPONENT_PIPELINE_CONNECTOR_GROUP
+    _COMPONENT_PIPELINE_CONNECTOR_GROUP = None
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
