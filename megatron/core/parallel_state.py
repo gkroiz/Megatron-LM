@@ -58,6 +58,7 @@ _NUM_COMPONENT_LAYERS = None
 # TODO (gersonkroiz) Verify this
 def initialize_model_components_parallel(
     parallelization_specs: dict,
+    use_fp8: bool = False,
 ):
     """Initialize data parallel groups for component of the model.
     
@@ -92,10 +93,10 @@ def initialize_model_components_parallel(
         all_gpu_ranks[k] = parallelization_specs[k]['gpu_ranks']
         
     for k in parallelization_specs:
-        if world_sizes[k] % (tensor_model_parallel_sizes[k] * pipeline_model_parallel_sizes[k]) != 0:
+        if world_sizes[k] % (tensor_model_parallel_group_sizes[k] * pipeline_model_parallel_group_sizes[k]) != 0:
             raise RuntimeError(
                 f"component world_size ({world_size[k]}) is not divisible by tensor_model_parallel_size "
-                f"({tensor_model_parallel_size[k]}) x pipeline_model_parallel_size ({pipeline_model_parallel_size[k]})"
+                f"({tensor_model_parallel_group_sizes[k]}) x pipeline_model_parallel_size ({pipeline_model_parallel_group_sizes[k]})"
             )
 
     rank = torch.distributed.get_rank()
@@ -140,9 +141,9 @@ def initialize_model_components_parallel(
         for i in range(all_num_tensor_model_parallel_groups[k]):
             ranks = range(all_gpu_ranks[k][i * tensor_model_parallel_group_sizes[k]],
                           all_gpu_ranks[k][((i + 1) * tensor_model_parallel_group_sizes[k])-1]+1)
-        group = torch.distributed.new_group(ranks)
-        if rank in ranks:
-            _TENSOR_MODEL_PARALLEL_GROUP = group
+            group = torch.distributed.new_group(ranks)
+            if rank in ranks:
+                _TENSOR_MODEL_PARALLEL_GROUP = group
 
     # Build the pipeline model-parallel and component pipeline connector groups
     global _PIPELINE_MODEL_PARALLEL_GROUP
