@@ -52,6 +52,8 @@ _DATA_PARALLEL_GLOBAL_RANKS = None
 # Memory buffers to avoid dynamic memory allocation
 _GLOBAL_MEMORY_BUFFER = None
 
+# number of layers in the component that the current rank belongs to
+_NUM_COMPONENT_LAYERS = None
 
 # TODO (gersonkroiz) Verify this
 def initialize_model_components_parallel(
@@ -507,6 +509,7 @@ def get_component_pipeline_connector_group():
         'component pipeline connector group is not initialized'
     return _COMPONENT_PIPELINE_CONNECTOR_GROUP
 
+
 def set_tensor_model_parallel_world_size(world_size):
     """Set the tensor model parallel size"""
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
@@ -518,10 +521,12 @@ def set_pipeline_model_parallel_world_size(world_size):
     global _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
 
+
 def set_virtual_pipeline_model_parallel_world_size(world_size):
     """Set the pipeline model parallel size"""
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
+
 
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
@@ -687,6 +692,18 @@ def set_virtual_pipeline_model_parallel_world_size(world_size):
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
 
 
+def get_num_component_layers():
+    """Return the number of layers in component."""
+    global _NUM_COMPONENT_LAYERS
+    return _NUM_COMPONENT_LAYERS
+
+
+def set_num_component_layers(num_layers):
+    """Set the number of layers in compoment."""
+    global _NUM_COMPONENT_LAYERS
+    _NUM_COMPONENT_LAYERS = num_layers
+
+
 def get_tensor_model_parallel_src_rank():
     """Calculate the global rank corresponding to the first local rank
     in the tensor model parallel group."""
@@ -790,3 +807,5 @@ def destroy_model_parallel():
     _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
     global _GLOBAL_MEMORY_BUFFER
     _GLOBAL_MEMORY_BUFFER = None
+    global _NUM_COMPONENT_LAYERS
+    _NUM_COMPONENT_LAYERS = None
