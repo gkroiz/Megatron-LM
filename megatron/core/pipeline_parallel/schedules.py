@@ -1117,19 +1117,26 @@ def forward_backward_pipelining_without_interleaving(*,
             no_sync_context = None
     disable_grad_sync()
 
+    print('forward_backward_pipelining_without_interleaving: ' + str(forward_backward_pipelining_without_interleaving))
+    print('parallel_state.get_pipeline_model_parallel_world_size(): ' + str(parallel_state.get_pipeline_model_parallel_world_size()))
+    print('parallel_state.get_pipeline_model_parallel_rank(): ' + str(parallel_state.get_pipeline_model_parallel_rank()))
     # Compute number of warmup microbatches.
     num_warmup_microbatches = \
         (parallel_state.get_pipeline_model_parallel_world_size() -
          parallel_state.get_pipeline_model_parallel_rank() - 1)
+    print('num_warmup_microbatches1: ' + str(num_warmup_microbatches))
     num_warmup_microbatches = min(
         num_warmup_microbatches,
         num_microbatches)
+    print('num_warmup_microbatches2: ' + str(num_warmup_microbatches))
     num_microbatches_remaining = \
         num_microbatches - num_warmup_microbatches
+    print('num_microbatches_remaining: ' + str(num_microbatches_remaining))
 
     model_type = get_model_type(model)
 
     rank = parallel_state.get_pipeline_model_parallel_rank()
+    print('rank: ' + str(rank))
     recv_tensor_shapes = get_tensor_shapes(rank=rank-1,
                                            model_type=model_type,
                                            tensor_shape=tensor_shape,
