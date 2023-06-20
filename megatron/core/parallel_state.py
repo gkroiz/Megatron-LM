@@ -9,6 +9,8 @@ from .utils import GlobalMemoryBuffer
 
 # Intra-layer model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
+# Inter-layer model component parallel group that the current rank belongs to.
+_PIPELINE_COMPONENT_PARALLEL_GROUP = None
 # Inter-layer model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 # Model parallel group (both intra- and pipeline) that the current rank belongs to.
@@ -39,8 +41,10 @@ _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = None
 # These values enable us to change the mpu sizes on the fly.
 _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
 _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+_MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE = None
 _MPU_TENSOR_MODEL_PARALLEL_RANK = None
 _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
+_MPU_PIPELINE_COMPONENT_PARALLEL_RANK = None
 
 # A list of ranks that have a copy of the embedding.
 _EMBEDDING_GLOBAL_RANKS = None
@@ -153,6 +157,7 @@ def initialize_model_components_parallel(
                 _TENSOR_MODEL_PARALLEL_GROUP = group
 
     # Build the pipeline model-parallel and component pipeline connector groups
+    global _PIPELINE_COMPONENT_PARALLEL_GROUP
     global _PIPELINE_MODEL_PARALLEL_GROUP
     global _PIPELINE_GLOBAL_RANKS
     global _PREV_PIPELINE_MODEL_PARALLEL_RANK
@@ -163,7 +168,11 @@ def initialize_model_components_parallel(
     first_component_name = list(parallelization_specs.keys())[0] 
     last_component_name = list(parallelization_specs.keys())[-1]
 
-    assert _PIPELINE_MODEL_PARALLEL_GROUP is None, \
+    # arrays to define full pipeline model parallel groups
+    full_pipeline_model_parallel_groups = [[] for _ in range(all_num_pipeline_model_parallel_groups[first_component_name])]
+    full_pipeline_model_parallel_groups_ranks_tracker = [_ for _ in range(all_num_pipeline_model_parallel_groups[first_component_name])]
+
+    assert _PIPELINE_COMPONENT_PARALLEL_GROUP is None, \
         'pipeline model parallel group is already initialized'
     for k in parallelization_specs:
         for i in range(all_num_pipeline_model_parallel_groups[k]):
@@ -173,6 +182,13 @@ def initialize_model_components_parallel(
                 all_num_pipeline_model_parallel_groups[k]
             )
             group = torch.distributed.new_group(ranks)
+
+            assert full_pipeline_model_parallel_groups_ranks_tracker[i] in ranks
+            for tmp_rank in ranks:
+                full_pipeline_model_parallel_groups[i].append(tmp_rank)
+                full_pipeline_model_parallel_groups_ranks_tracker[i] = tmp_rank
+            full_pipeline_model_parallel_groups_ranks_tracker[i] += all_num_pipeline_model_parallel_groups[k]
+
             if rank in ranks:
                 _FIRST_PIPELINE_MODEL_PARALLEL_RANK = all_gpu_ranks[first_component_name][i]
 
@@ -184,7 +200,7 @@ def initialize_model_components_parallel(
                 )
                 _LAST_PIPELINE_MODEL_PARALLEL_RANK = last_component_pipeline_model_parallel_ranks[-1]
 
-                _PIPELINE_MODEL_PARALLEL_GROUP = group
+                _PIPELINE_COMPONENT_PARALLEL_GROUP = group
                 _PIPELINE_GLOBAL_RANKS = ranks
                 if not (rank == ranks[0] and k == list(parallelization_specs.keys())[0]):
                     _PREV_PIPELINE_MODEL_PARALLEL_RANK = rank - all_num_pipeline_model_parallel_groups[k]
@@ -195,6 +211,11 @@ def initialize_model_components_parallel(
                     _NEXT_PIPELINE_MODEL_PARALLEL_RANK = rank + all_num_pipeline_model_parallel_groups[k]
                 else:
                     _NEXT_PIPELINE_MODEL_PARALLEL_RANK = -1
+
+    for grouping in full_pipeline_model_parallel_groups:
+        if rank in grouping:
+            group = torch.distributed.new_group(grouping) 
+            _PIPELINE_MODEL_PARALLEL_GROUP = group
 
     # Build the embedding groups (first and last rank in each pipeline model-parallel group).
     # The embedding groups are defined based on the entire model, not individual components
@@ -395,9 +416,9 @@ def initialize_model_parallel(
 
     # Build the pipeline model-parallel groups and embedding groups
     # (first and last rank in each pipeline model-parallel group).
-    global _PIPELINE_MODEL_PARALLEL_GROUP
+    global _PIPELINE_COMPONENT_PARALLEL_GROUP
     global _PIPELINE_GLOBAL_RANKS
-    assert _PIPELINE_MODEL_PARALLEL_GROUP is None, \
+    assert _PIPELINE_COMPONENT_PARALLEL_GROUP is None, \
         'pipeline model parallel group is already initialized'
     global _EMBEDDING_GROUP
     global _EMBEDDING_GLOBAL_RANKS
@@ -410,7 +431,7 @@ def initialize_model_parallel(
         ranks = range(i, world_size, num_pipeline_model_parallel_groups)
         group = torch.distributed.new_group(ranks)
         if rank in ranks:
-            _PIPELINE_MODEL_PARALLEL_GROUP = group
+            _PIPELINE_COMPONENT_PARALLEL_GROUP = group
             _PIPELINE_GLOBAL_RANKS = ranks
         # Setup embedding group (to exchange gradients between
         # first and last stages).
@@ -471,7 +492,7 @@ def is_unitialized():
 def model_parallel_is_initialized():
     """Check if model and data parallel groups are initialized."""
     if _TENSOR_MODEL_PARALLEL_GROUP is None or \
-        _PIPELINE_MODEL_PARALLEL_GROUP is None or \
+        _PIPELINE_COMPONENT_PARALLEL_GROUP is None or \
         _DATA_PARALLEL_GROUP is None:
         return False
     return True
@@ -496,6 +517,13 @@ def get_pipeline_model_parallel_group():
     assert _PIPELINE_MODEL_PARALLEL_GROUP is not None, \
         'pipeline_model parallel group is not initialized'
     return _PIPELINE_MODEL_PARALLEL_GROUP
+
+
+def get_pipeline_component_parallel_group():
+    """Get the pipeline model parallel group the caller rank belongs to."""
+    assert _PIPELINE_COMPONENT_PARALLEL_GROUP is not None, \
+        'pipeline_model parallel group is not initialized'
+    return _PIPELINE_COMPONENT_PARALLEL_GROUP
 
 
 def get_data_parallel_group():
@@ -545,6 +573,12 @@ def set_pipeline_model_parallel_world_size(world_size):
     _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
 
 
+def set_pipeline_component_parallel_world_size(world_size):
+    """Set the pipeline component parallel size"""
+    global _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+    _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE = world_size
+
+
 def set_virtual_pipeline_model_parallel_world_size(world_size):
     """Set the pipeline model parallel size"""
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
@@ -567,6 +601,14 @@ def get_pipeline_model_parallel_world_size():
     return torch.distributed.get_world_size(group=get_pipeline_model_parallel_group())
 
 
+def get_pipeline_component_parallel_world_size():
+    """Return world size for the pipeline model parallel group."""
+    global _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+    if _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE is not None:
+        return _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+    return torch.distributed.get_world_size(group=get_pipeline_component_parallel_group())
+
+
 def set_tensor_model_parallel_rank(rank):
     """Set tensor model parallel rank."""
     global _MPU_TENSOR_MODEL_PARALLEL_RANK
@@ -577,6 +619,12 @@ def set_pipeline_model_parallel_rank(rank):
     """Set pipeline model parallel rank."""
     global _MPU_PIPELINE_MODEL_PARALLEL_RANK
     _MPU_PIPELINE_MODEL_PARALLEL_RANK = rank
+
+
+def set_pipeline_component_parallel_rank(rank):
+    """Set pipeline component parallel rank."""
+    global _MPU_PIPELINE_COMPONENT_PARALLEL_RANK
+    _MPU_PIPELINE_COMPONENT_PARALLEL_RANK = rank
 
 
 def set_pipeline_model_parallel_split_rank(rank):
@@ -601,6 +649,14 @@ def get_pipeline_model_parallel_rank():
     return torch.distributed.get_rank(group=get_pipeline_model_parallel_group())
 
 
+def get_pipeline_component_parallel_rank():
+    """Return my rank for the pipeline component parallel group."""
+    global _MPU_PIPELINE_COMPONENT_PARALLEL_RANK
+    if _MPU_PIPELINE_COMPONENT_PARALLEL_RANK is not None:
+        return _MPU_PIPELINE_COMPONENT_PARALLEL_RANK
+    return torch.distributed.get_rank(group=get_pipeline_component_parallel_group())
+
+
 def get_pipeline_model_parallel_split_rank():
     """Return pipeline model parallel split rank."""
     global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
@@ -616,6 +672,12 @@ def is_pipeline_first_stage(ignore_virtual=False):
     return get_pipeline_model_parallel_rank() == 0
 
 
+def is_pipeline_component_first_stage():
+    """Return True if in the first pipeline component-parallel stage, False otherwise."""
+    # TODO: implement virtual conditional
+    return get_pipeline_component_parallel_rank() == 0
+
+
 def is_pipeline_last_stage(ignore_virtual=False):
     """Return True if in the last pipeline model-parallel stage, False otherwise."""
     if not ignore_virtual:
@@ -627,6 +689,13 @@ def is_pipeline_last_stage(ignore_virtual=False):
             return False
     return get_pipeline_model_parallel_rank() == (
         get_pipeline_model_parallel_world_size() - 1)
+
+
+def is_pipeline_component_last_stage():
+    """Return True if in the last pipeline component-parallel stage, False otherwise."""
+    # TODO: implement virtual conditional
+    return get_pipeline_component_parallel_rank() == (
+        get_pipeline_component_parallel_world_size() - 1)
 
 
 def is_rank_in_embedding_group(ignore_virtual=False):
@@ -804,6 +873,8 @@ def destroy_model_parallel():
     _MODEL_PARALLEL_GROUP = None
     global _TENSOR_MODEL_PARALLEL_GROUP
     _TENSOR_MODEL_PARALLEL_GROUP = None
+    global _PIPELINE_COMPONENT_PARALLEL_GROUP
+    _PIPELINE_COMPONENT_PARALLEL_GROUP = None
     global _PIPELINE_MODEL_PARALLEL_GROUP
     _PIPELINE_MODEL_PARALLEL_GROUP = None
     global _DATA_PARALLEL_GROUP
@@ -830,10 +901,14 @@ def destroy_model_parallel():
     _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
     global _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+    global _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+    _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE = None
     global _MPU_TENSOR_MODEL_PARALLEL_RANK
     _MPU_TENSOR_MODEL_PARALLEL_RANK = None
     global _MPU_PIPELINE_MODEL_PARALLEL_RANK
     _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
+    global _MPU_PIPELINE_COMPONENT_PARALLEL_RANK
+    _MPU_PIPELINE_COMPONENT_PARALLEL_RANK = None
     global _GLOBAL_MEMORY_BUFFER
     _GLOBAL_MEMORY_BUFFER = None
     global _NUM_COMPONENT_LAYERS
