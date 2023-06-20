@@ -9,8 +9,8 @@ import nvtx
 
 from megatron import core
 from megatron.core.parallel_state import (
-    get_pipeline_model_parallel_group,
-    get_pipeline_model_parallel_rank,
+    get_pipeline_component_parallel_group,
+    get_pipeline_component_parallel_rank,
     get_pipeline_model_parallel_prev_rank,
     get_pipeline_model_parallel_next_rank,
 )
@@ -65,7 +65,7 @@ def _communicate_shapes(tensor_send_next, tensor_send_prev,
                                         tensor_recv_prev=recv_prev_shape_tensor,
                                         tensor_send_next=send_next_shape_tensor,
                                         tensor_recv_next=recv_next_shape_tensor,
-                                        group=get_pipeline_model_parallel_group())
+                                        group=get_pipeline_component_parallel_group())
     else:
         ops = []
         if send_prev_shape_tensor is not None:
@@ -151,8 +151,8 @@ def _p2p_ops(*,
              tensor_recv_next: Optional[torch.Tensor],
              group: torch.distributed.ProcessGroup):
     reqs = []
-    rank = get_pipeline_model_parallel_rank()
-    if get_pipeline_model_parallel_rank() % 2 == 0:
+    rank = get_pipeline_component_parallel_rank()
+    if get_pipeline_component_parallel_rank() % 2 == 0:
         if tensor_send_next is not None:
             send_next_req = torch.distributed.isend(
                 tensor=tensor_send_next,
@@ -345,7 +345,7 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
                     tensor_recv_prev=tensor_recv_prev,
                     tensor_send_next=tensor_send_next,
                     tensor_recv_next=tensor_recv_next,
-                    group=get_pipeline_model_parallel_group())
+                    group=get_pipeline_component_parallel_group())
 
     if wait_on_reqs and len(reqs) > 0:
         for req in reqs:
