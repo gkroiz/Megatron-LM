@@ -127,9 +127,8 @@ def get_forward_backward_func():
         an iterable of parameters to be synchronized.
 
     """
-    # NOTE: get_pipeline_component_parallel_world_size() -> component of model
-    pipeline_component_parallel_size = parallel_state.get_pipeline_component_parallel_world_size()
-    if pipeline_component_parallel_size > 1:
+    pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
+    if pipeline_model_parallel_size > 1:
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             forward_backward_func = forward_backward_pipelining_with_interleaving
         else:
@@ -234,7 +233,7 @@ def forward_step(forward_step_func,
     with context_manager:
         output_tensor, loss_func = forward_step_func(data_iterator, model)
 
-    if parallel_state.is_pipeline_component_last_stage():
+    if parallel_state.is_pipeline_last_stage():
         if not collect_non_loss_data:
             output_tensor = loss_func(output_tensor)
             loss, loss_reduced = output_tensor
@@ -321,8 +320,7 @@ def backward_step(grad_scaler, input_tensor, output_tensor,
 
     # Handle single skip connection if it exists (encoder_hidden_state in
     # model with encoder and decoder).
-    # NOTE: get_pipeline_component_parallel_world_size(): component of model
-    if parallel_state.get_pipeline_component_parallel_world_size() > 1 and \
+    if parallel_state.get_pipeline_model_parallel_world_size() > 1 and \
             parallel_state.is_pipeline_stage_after_split() and \
             model_type == ModelType.encoder_and_decoder:
         if output_tensor_grad[1] is not None:
@@ -479,10 +477,9 @@ def forward_backward_pipelining_with_interleaving(*,
     forward_data_store = []
     if not forward_only:
         output_tensor_grads = [[] for _ in range(len(model))]
-    # NOTE: get_pipeline_component_parallel_world_size() -> component of model
-    # NOTE: get_pipeline_component_parallel_rank() -> component of model
-    pipeline_parallel_size = parallel_state.get_pipeline_component_parallel_world_size()
-    pipeline_parallel_rank = parallel_state.get_pipeline_component_parallel_rank()
+
+    pipeline_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
+    pipeline_parallel_rank = parallel_state.get_pipeline_model_parallel_rank()
 
     if num_microbatches % pipeline_parallel_size != 0:
         msg = f'number of microbatches ({num_microbatches}) is not divisible by '
@@ -587,7 +584,7 @@ def forward_backward_pipelining_with_interleaving(*,
                     param_sync_func(model[param_sync_chunk_id].parameters())
 
         # forward step
-        if parallel_state.is_pipeline_component_first_stage():
+        if parallel_state.is_pipeline_first_stage():
             if len(input_tensors[model_chunk_id]) == \
                     len(output_tensors[model_chunk_id]):
                 input_tensors[model_chunk_id].append(None)
@@ -623,7 +620,7 @@ def forward_backward_pipelining_with_interleaving(*,
             enable_grad_sync()
             synchronized_model_chunks.add(model_chunk_id)
 
-        if parallel_state.is_pipeline_component_last_stage():
+        if parallel_state.is_pipeline_last_stage():
             if len(output_tensor_grads[model_chunk_id]) == 0:
                 output_tensor_grads[model_chunk_id].append(None)
         input_tensor = input_tensors[model_chunk_id].pop(0)
@@ -676,14 +673,14 @@ def forward_backward_pipelining_with_interleaving(*,
         # Determine if tensor should be received from previous stage.
         next_forward_model_chunk_id = get_model_chunk_id(k+1, forward=True)
         recv_prev = True
-        if parallel_state.is_pipeline_component_first_stage():
+        if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
             if next_forward_model_chunk_id == 0:
                 recv_prev = False
         if k == (total_num_microbatches - 1):
             recv_prev = False
 
         # Don't send tensor downstream if on last stage.
-        if parallel_state.is_pipeline_component_last_stage():
+        if parallel_state.is_pipeline_last_stage():
             output_tensor = None
 
         # Send and receive tensors as appropriate (send tensors computed
@@ -693,7 +690,7 @@ def forward_backward_pipelining_with_interleaving(*,
                     not all_warmup_microbatches:
                 input_tensor_grad = None
                 recv_next = True
-                if parallel_state.is_pipeline_component_last_stage():
+                if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                     recv_next = False
                 input_tensor, output_tensor_grad = \
                     p2p_communication.send_forward_backward_recv_forward_backward(
@@ -727,7 +724,7 @@ def forward_backward_pipelining_with_interleaving(*,
                     not all_warmup_microbatches:
                 input_tensor_grad = None
                 recv_next = True
-                if parallel_state.is_pipeline_component_last_stage():
+                if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                     recv_next = False
 
                 output_tensor_grad, bwd_wait_handles = p2p_communication.send_backward_recv_backward(
@@ -763,13 +760,13 @@ def forward_backward_pipelining_with_interleaving(*,
             parallel_state.set_virtual_pipeline_model_parallel_rank(forward_model_chunk_id)
 
             # Last virtual stage no activation tensor to send
-            if parallel_state.is_pipeline_component_last_stage():
+            if parallel_state.is_pipeline_last_stage():
                 output_tensor = None
 
             # Determine if peers are sending, and where in data structure to put
             # received tensors.
             recv_prev = True
-            if parallel_state.is_pipeline_component_first_stage():
+            if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
                 # First stage is ahead of last stage by (pipeline_parallel_size - 1).
                 next_forward_model_chunk_id = get_model_chunk_id(
                     forward_k - (pipeline_parallel_size - 1), forward=True)
@@ -809,12 +806,12 @@ def forward_backward_pipelining_with_interleaving(*,
             parallel_state.set_virtual_pipeline_model_parallel_rank(backward_model_chunk_id)
 
             # First virtual stage no activation gradient tensor to send
-            if parallel_state.is_pipeline_component_first_stage():
+            if parallel_state.is_pipeline_first_stage():
                 input_tensor_grad = None
 
             # Determine if the current virtual stage has an activation gradient tensor to receive
             recv_next = True
-            if parallel_state.is_pipeline_component_last_stage():
+            if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                 # Last stage is ahead of first stage by (pipeline_parallel_size - 1).
                 next_backward_model_chunk_id = get_model_chunk_id(
                     backward_k - (pipeline_parallel_size - 1), forward=False
@@ -849,18 +846,18 @@ def forward_backward_pipelining_with_interleaving(*,
             # otherwise set tensor to None.
             forward_model_chunk_id = get_model_chunk_id(forward_k, forward=True)
             parallel_state.set_virtual_pipeline_model_parallel_rank(forward_model_chunk_id)
-            if parallel_state.is_pipeline_component_last_stage():
+            if parallel_state.is_pipeline_last_stage():
                 output_tensor = None
 
             backward_model_chunk_id = get_model_chunk_id(backward_k, forward=False)
             parallel_state.set_virtual_pipeline_model_parallel_rank(backward_model_chunk_id)
-            if parallel_state.is_pipeline_component_first_stage():
+            if parallel_state.is_pipeline_first_stage():
                 input_tensor_grad = None
 
             # Determine if peers are sending, and where in data structure to put
             # received tensors.
             recv_prev = True
-            if parallel_state.is_pipeline_component_first_stage():
+            if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
                 # First stage is ahead of last stage by (pipeline_parallel_size - 1).
                 next_forward_model_chunk_id = get_model_chunk_id(
                     forward_k - (pipeline_parallel_size - 1), forward=True)
@@ -872,7 +869,7 @@ def forward_backward_pipelining_with_interleaving(*,
                                                                  forward=True)
 
             recv_next = True
-            if parallel_state.is_pipeline_component_last_stage():
+            if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                 # Last stage is ahead of first stage by (pipeline_parallel_size - 1).
                 next_backward_model_chunk_id = get_model_chunk_id(
                     backward_k - (pipeline_parallel_size - 1), forward=False)
@@ -925,7 +922,7 @@ def forward_backward_pipelining_with_interleaving(*,
             input_tensor_grad = backward_step_helper(k)
             next_backward_model_chunk_id = get_model_chunk_id(k+1, forward=False)
             recv_next = True
-            if parallel_state.is_pipeline_component_last_stage():
+            if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                 if next_backward_model_chunk_id == (num_model_chunks - 1):
                     recv_next = False
             if k == (total_num_microbatches - 1):
