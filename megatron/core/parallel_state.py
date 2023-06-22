@@ -140,13 +140,15 @@ def initialize_model_components_parallel(
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP
     assert _MODEL_PARALLEL_GROUP is None, 'model parallel group is already initialized'
-    for k in parallelization_specs:
-        for i in range(data_parallel_group_sizes[k]):
-            ranks = [data_parallel_group_ranks[i]
-                    for data_parallel_group_ranks in all_data_parallel_group_ranks[k]]
-            group = torch.distributed.new_group(ranks)
-            if rank in ranks:
-                _MODEL_PARALLEL_GROUP = group
+    # TODO: need to modify for fan-in/out
+    for i in range(data_parallel_group_sizes[k]):
+        ranks = []
+        for k in parallelization_specs:
+            for data_parallel_group_ranks in all_data_parallel_group_ranks[k]:
+                ranks.append(data_parallel_group_ranks[i])
+        group = torch.distributed.new_group(ranks)
+        if rank in ranks:
+            _MODEL_PARALLEL_GROUP = group
 
     # Build the tensor model-parallel groups.
     global _TENSOR_MODEL_PARALLEL_GROUP
