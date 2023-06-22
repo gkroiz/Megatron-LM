@@ -195,6 +195,7 @@ def initialize_model_components_parallel(
                 full_pipeline_model_parallel_groups_ranks_tracker[i] = tmp_rank
             full_pipeline_model_parallel_groups_ranks_tracker[i] += all_num_pipeline_model_parallel_groups[k]
 
+            # define global vars for full model pipeline parallel group
             if rank in ranks:
 
                 # define first and last ranks in full model pipeline parallel group
@@ -222,20 +223,26 @@ def initialize_model_components_parallel(
                 else:
                     _NEXT_PIPELINE_MODEL_PARALLEL_RANK = -1
 
-                # define component pipeline connector groups
+            # define component pipeline connector groups
+            # TODO: need to modify for fan-in/out
+            if k != list(parallelization_specs.keys())[-1]:
+                # establish the groups connecting this component with next component
                 connector_ranks = [ranks[-1], (ranks[-1] + all_num_pipeline_model_parallel_groups[k]) % sum(world_sizes.values())]
-                _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP = torch.distributed.new_group(connector_ranks)
-                if (k == list(parallelization_specs.keys())[-1]) or (rank not in connector_ranks):
-                    _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP = -1
+                connector_group = torch.distributed.new_group(connector_ranks)
 
-                connector_ranks = [(ranks[0]-all_num_pipeline_model_parallel_groups[k]) % sum(world_sizes.values()), ranks[0]]
-                _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP = torch.distributed.new_group(connector_ranks)
-                if (k == list(parallelization_specs.keys())[0]) or rank not in connector_ranks:
-                    _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP = -1
+                if rank in connector_ranks:
+                    if rank == connector_ranks[0]:
+                        assert _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP is None
+                        _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP = connector_group
+
+                    if rank == connector_ranks[1]:
+                        assert _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP is None
+                        _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP = connector_group
+
 
     for grouping in full_pipeline_model_parallel_groups:
+        group = torch.distributed.new_group(grouping) 
         if rank in grouping:
-            group = torch.distributed.new_group(grouping) 
             _PIPELINE_MODEL_PARALLEL_GROUP = group
 
     # Build the embedding groups (first and last rank in each pipeline model-parallel group).
@@ -547,11 +554,9 @@ def get_pipeline_component_parallel_group(direction: Optional[str] = ''):
         assert direction in ['next', 'prev']
         if direction == 'next' and is_pipeline_component_last_stage():
             assert _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP is not None
-            assert _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP != -1
             return _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP
         if direction == 'prev' and is_pipeline_component_first_stage():
             assert _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP is not None
-            assert _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP != -1
             return _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP
     assert _PIPELINE_COMPONENT_PARALLEL_GROUP is not None, \
         'pipeline_model parallel group is not initialized'
