@@ -381,6 +381,7 @@ def recv_forward(tensor_shape: Shape,
 
     See _communicate for argument details.
     """
+    print('p2p in recv_foward')
 
     if core.parallel_state.is_pipeline_first_stage():
         input_tensor = None
@@ -408,6 +409,8 @@ def recv_backward(tensor_shape: Shape,
 
     See _communicate for argument details.
     """
+    print('p2p in recv_backward')
+
     if core.parallel_state.is_pipeline_last_stage():
         output_tensor_grad = None
     else:
@@ -433,6 +436,7 @@ def send_forward(output_tensor: torch.Tensor,
 
     See _communicate for argument details.
     """
+    print('p2p in send_forward')
 
     if not core.parallel_state.is_pipeline_last_stage():
         if timers is not None:
@@ -458,6 +462,8 @@ def send_backward(input_tensor_grad: torch.Tensor,
 
     See _communicate for argument details.
     """
+    print('p2p in send_backward')
+
     if not core.parallel_state.is_pipeline_first_stage():
         if timers is not None:
             timers('backward-send', log_level=2).start()
@@ -482,6 +488,7 @@ def send_forward_recv_backward(output_tensor: torch.Tensor,
 
     See _communicate for argument details.
     """
+    print('p2p in send_forward_recv_backward')
     if core.parallel_state.is_pipeline_last_stage():
         output_tensor_grad = None
     else:
@@ -509,6 +516,7 @@ def send_backward_recv_forward(input_tensor_grad: torch.Tensor,
 
     See _communicate for argument details.
     """
+    print('p2p in send_backward_recv_forward')
     if core.parallel_state.is_pipeline_first_stage():
         input_tensor = None
     else:
@@ -538,6 +546,7 @@ def send_forward_recv_forward(output_tensor: torch.Tensor,
 
     See _communicate for argument details.
     """
+    print('p2p in send_forward_recv_forward')
     if timers is not None:
         timers('forward-send-forward-recv', log_level=2).start()
     input_tensor, _, wait_handles = _communicate(
@@ -567,6 +576,7 @@ def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
 
     See _communicate for argument details.
     """
+    print('p2p in send_backward_recv_backward')
     if timers is not None:
         timers('backward-send-backward-recv', log_level=2).start()
     _, output_tensor_grad, wait_handles = _communicate(
@@ -598,6 +608,7 @@ def send_forward_backward_recv_forward_backward(
 
     See _communicate for argument details.
     """
+    print('p2p in send_forward_backward_recv_forward_backward')
     if timers is not None:
         timers('forward-backward-send-forward-backward-recv',
                log_level=2).start()
