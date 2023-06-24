@@ -1124,13 +1124,12 @@ def forward_backward_pipelining_without_interleaving(*,
     num_warmup_microbatches = \
         (parallel_state.get_pipeline_model_parallel_world_size() -
          parallel_state.get_pipeline_model_parallel_rank() - 1)
-    print('num_warmup_microbatches1: ' + str(num_warmup_microbatches))
     num_warmup_microbatches = min(
         num_warmup_microbatches,
         num_microbatches)
-    print('num_warmup_microbatches2: ' + str(num_warmup_microbatches))
     num_microbatches_remaining = \
         num_microbatches - num_warmup_microbatches
+    print('num_warmup_microbatches: ' + str(num_warmup_microbatches))
     print('num_microbatches_remaining: ' + str(num_microbatches_remaining))
 
     model_type = get_model_type(model)
@@ -1161,6 +1160,7 @@ def forward_backward_pipelining_without_interleaving(*,
 
     # Run warmup forward passes.
     warmup_rng = nvtx.start_range(message="fwd_pass_warmup", color="green")
+    print('---SCHEDULE: before warmup forward pass')
     for i in range(num_warmup_microbatches):
         if i % 2 == 0:
             nvtx.mark(message=f"fwd_pass_warmup: {i}, rank: {rank}", color="yellow")
@@ -1170,30 +1170,35 @@ def forward_backward_pipelining_without_interleaving(*,
         output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                      input_tensor, forward_data_store,
                                      timers, collect_non_loss_data, dtype, enable_autocast)
+        print('---SCHEDULE: output_tensor: ' + str(output_tensor))
         send_forward(output_tensor, send_tensor_shapes, timers=timers)
 
         if not forward_only:
             input_tensors.append(input_tensor)
             output_tensors.append(output_tensor)
             deallocate_output_tensor(output_tensor[0], deallocate_pipeline_outputs)
-
+    print('---SCHEDULE: after warmup forward pass')
     nvtx.end_range(warmup_rng)
 
     # Before running 1F1B, need to receive first forward tensor.
     # If all microbatches are run in warmup / cooldown phase, then no need to
     # receive this tensor here.
     if num_microbatches_remaining > 0:
+        print('---SCHEDULE: recv_forward before 1F1B')
         input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
+        print('---SCHEDULE: input_tensor: ' + str(input_tensor))
 
     steady_state_rng = nvtx.start_range(message="fwd_pass_steady_state", color="darkgreen")
     # Run 1F1B in steady state.
     for i in range(num_microbatches_remaining):
         last_iteration = (i == (num_microbatches_remaining - 1))
 
+        print('---SCHEDULE: before 1F')
         output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                      input_tensor, forward_data_store,
                                      timers, collect_non_loss_data, dtype, enable_autocast)
-
+        print('---SCHEDULE: output_tensor: ' + str(output_tensor))
+        print('---SCHEDULE: after 1F')
         if forward_only:
             send_forward(output_tensor, send_tensor_shapes, timers=timers)
 
@@ -1201,10 +1206,13 @@ def forward_backward_pipelining_without_interleaving(*,
                 input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
 
         else:
+            print('---SCHEDULE: before send_forward_recv_backward')
             output_tensor_grad = \
                 send_forward_recv_backward(output_tensor,
                                            send_tensor_shapes, dtype,
                                            timers=timers)
+            print('---SCHEDULE: output_tensor_grad: ' + str(output_tensor_grad))
+            print('---SCHEDULE: after send_forward_recv_backward')
 
             # Add input_tensor and output_tensor to end of list.
             input_tensors.append(input_tensor)
@@ -1216,22 +1224,37 @@ def forward_backward_pipelining_without_interleaving(*,
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
 
+            print('---SCHEDULE: before backward_step')
+            print('-----params - grad_scaler: ' + str(grad_scaler))
+            print('-----params - input_tensor: ' + str(input_tensor))
+            print('-----params - output_tensor: ' + str(output_tensor))
+            print('-----params - output_tensor_grad: ' + str(output_tensor_grad))
+            print('-----params - model_type: ' + str(model_type))
+            print('-----params - timers: ' + str(timers))
+            print('-----params - deallocate_pipeline_outputs: ' + str(deallocate_pipeline_outputs))
             input_tensor_grad = \
                 backward_step(grad_scaler, input_tensor, output_tensor,
                               output_tensor_grad, model_type, timers, deallocate_pipeline_outputs)
+            print('---SCHEDULE: input_tensor_grad: ' + str(input_tensor_grad))
+            print('---SCHEDULE: after backward_step')
 
             if last_iteration:
+                print('---SCHEDULE: last iteration before send_backward')
                 input_tensor = None
                 send_backward(input_tensor_grad, recv_tensor_shapes, timers=timers)
+                print('---SCHEDULE: last iteration after send_backward')
             else:
+                print('---SCHEDULE: before send_backward_recv_forward')
                 input_tensor = \
                     send_backward_recv_forward(
                         input_tensor_grad, recv_tensor_shapes, dtype, timers=timers)
+                print('---SCHEDULE: after send_backward_recv_forward')
 
     nvtx.end_range(steady_state_rng)
     # Run cooldown backward passes.
     if not forward_only:
         for i in range(num_warmup_microbatches):
+            print('---SCHEDULE: cooldown backward passes')
 
             # Enable async grad reduction in the last backward pass
             # Note: If grad sync function is provided, only enable
@@ -1240,18 +1263,25 @@ def forward_backward_pipelining_without_interleaving(*,
             # bubble.
             if i == num_warmup_microbatches-1:
                 if grad_sync_func is None or rank == 0:
+                    print('---SCHEDULE: enable grad sync')
                     enable_grad_sync()
 
             input_tensor = input_tensors.pop(0)
             output_tensor = output_tensors.pop(0)
-
+            print('---SCHEDULE: cooldown before recv_backward')
             output_tensor_grad = recv_backward(send_tensor_shapes, dtype, timers=timers)
+            print('---SCHEDULE: cooldown after recv_backward')
 
+            print('---SCHEDULE: cooldown before backward_step')
             input_tensor_grad = \
                 backward_step(grad_scaler, input_tensor, output_tensor,
                               output_tensor_grad, model_type, timers, deallocate_pipeline_outputs)
+            print('---SCHEDULE: cooldown before backward_step')
 
+
+            print('---SCHEDULE: cooldown before send_backward')
             send_backward(input_tensor_grad, recv_tensor_shapes, timers=timers)
+            print('---SCHEDULE: cooldown after send_backward')
 
     # Launch any remaining grad reductions
     if no_sync_context is not None:
