@@ -1167,6 +1167,7 @@ def forward_backward_pipelining_without_interleaving(*,
         else:
             nvtx.mark(message=f"fwd_pass_warmup: {i}, rank: {rank}", color="orange")
         input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
+        print('---SCHEDULE: input_tensor: ' + str(input_tensor))
         output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                      input_tensor, forward_data_store,
                                      timers, collect_non_loss_data, dtype, enable_autocast)
@@ -1270,12 +1271,14 @@ def forward_backward_pipelining_without_interleaving(*,
             output_tensor = output_tensors.pop(0)
             print('---SCHEDULE: cooldown before recv_backward')
             output_tensor_grad = recv_backward(send_tensor_shapes, dtype, timers=timers)
+            print('---SCHEDULE: output_tensor_grad: ' + str(output_tensor_grad))
             print('---SCHEDULE: cooldown after recv_backward')
 
             print('---SCHEDULE: cooldown before backward_step')
             input_tensor_grad = \
                 backward_step(grad_scaler, input_tensor, output_tensor,
                               output_tensor_grad, model_type, timers, deallocate_pipeline_outputs)
+            print('---SCHEDULE: input_tensor_grad: ' + str(output_tensor_grad))
             print('---SCHEDULE: cooldown before backward_step')
 
 

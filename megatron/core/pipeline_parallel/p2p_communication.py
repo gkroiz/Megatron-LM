@@ -341,11 +341,23 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
     else:
         p2p_func = _p2p_ops
 
+    print('-----BEFORE P2P FUNC-----')
+    print('tensor_recv_prev: ' + str(tensor_recv_prev))
+    print('tensor_send_prev: ' + str(tensor_send_prev))
+    print('tensor_send_next: ' + str(tensor_send_next))
+    print('tensor_recv_next: ' + str(tensor_recv_next))
+
     reqs = p2p_func(tensor_send_prev=tensor_send_prev,
                     tensor_recv_prev=tensor_recv_prev,
                     tensor_send_next=tensor_send_next,
                     tensor_recv_next=tensor_recv_next,
                     group=get_pipeline_model_parallel_group())
+
+    print('-----AFTER P2P FUNC-----')
+    print('tensor_recv_prev: ' + str(tensor_recv_prev))
+    print('tensor_send_prev: ' + str(tensor_send_prev))
+    print('tensor_send_next: ' + str(tensor_send_next))
+    print('tensor_recv_next: ' + str(tensor_recv_next))
 
     if wait_on_reqs and len(reqs) > 0:
         for req in reqs:
@@ -373,6 +385,7 @@ def recv_forward(tensor_shape: Shape,
     if core.parallel_state.is_pipeline_first_stage():
         input_tensor = None
     else:
+        print('in recv_forward')
         if timers is not None:
             timers('forward-recv', log_level=2).start()
         input_tensor, _, _ = _communicate(
@@ -399,6 +412,7 @@ def recv_backward(tensor_shape: Shape,
     if core.parallel_state.is_pipeline_last_stage():
         output_tensor_grad = None
     else:
+        print('in recv_backward')
         if timers is not None:
             timers('backward-recv', log_level=2).start()
         _, output_tensor_grad, _ = _communicate(
@@ -423,6 +437,7 @@ def send_forward(output_tensor: torch.Tensor,
     """
 
     if not core.parallel_state.is_pipeline_last_stage():
+        print('in send_forward')
         if timers is not None:
             timers('forward-send', log_level=2).start()
         rng = nvtx.start_range(message="send_forward", color="orange")
@@ -447,6 +462,7 @@ def send_backward(input_tensor_grad: torch.Tensor,
     See _communicate for argument details.
     """
     if not core.parallel_state.is_pipeline_first_stage():
+        print('in send_backward')
         if timers is not None:
             timers('backward-send', log_level=2).start()
         _communicate(
@@ -473,6 +489,7 @@ def send_forward_recv_backward(output_tensor: torch.Tensor,
     if core.parallel_state.is_pipeline_last_stage():
         output_tensor_grad = None
     else:
+        print('in send_forward_recv_backward')
         if timers is not None:
             timers('forward-send-backward-recv', log_level=2).start()
         _, output_tensor_grad,_ = _communicate(
@@ -500,6 +517,7 @@ def send_backward_recv_forward(input_tensor_grad: torch.Tensor,
     if core.parallel_state.is_pipeline_first_stage():
         input_tensor = None
     else:
+        print('in send_backward_recv_forward')
         if timers is not None:
             timers('backward-send-forward-recv', log_level=2).start()
         input_tensor, _, _ = _communicate(
@@ -526,6 +544,7 @@ def send_forward_recv_forward(output_tensor: torch.Tensor,
 
     See _communicate for argument details.
     """
+    print('in send_forward_recv_forward')
     if timers is not None:
         timers('forward-send-forward-recv', log_level=2).start()
     input_tensor, _, wait_handles = _communicate(
@@ -555,6 +574,7 @@ def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
 
     See _communicate for argument details.
     """
+    print('in send_backward_recv_backward')
     if timers is not None:
         timers('backward-send-backward-recv', log_level=2).start()
     _, output_tensor_grad, wait_handles = _communicate(
@@ -586,6 +606,7 @@ def send_forward_backward_recv_forward_backward(
 
     See _communicate for argument details.
     """
+    print('in send_forward_backward_recv_forward_backward')
     if timers is not None:
         timers('forward-backward-send-forward-backward-recv',
                log_level=2).start()
