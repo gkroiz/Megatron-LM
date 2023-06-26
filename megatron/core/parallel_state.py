@@ -81,6 +81,7 @@ _NUM_COMPONENT_LAYERS = None
 # TODO (gersonkroiz) Verify this
 def initialize_model_components_parallel(
     parallelization_specs: dict,
+    pipeline_model_parallel_split_rank: Optional[int] = None,
     use_fp8: bool = False,
 ):
     """Initialize data parallel groups for component of the model.
@@ -121,6 +122,10 @@ def initialize_model_components_parallel(
                 f"component world_size ({world_sizes[k]}) is not divisible by tensor_model_parallel_size "
                 f"({tensor_model_parallel_group_sizes[k]}) x pipeline_model_parallel_size ({pipeline_model_parallel_group_sizes[k]})"
             )
+
+    if pipeline_model_parallel_split_rank is not None:
+            global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
+            _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = pipeline_model_parallel_split_rank
 
     rank = torch.distributed.get_rank()
 
@@ -280,6 +285,14 @@ def initialize_model_components_parallel(
         if len(ranks) > 1:
             embedding_ranks = [ranks[0], ranks[-1]]
             position_embedding_ranks = [ranks[0]]
+            if pipeline_model_parallel_split_rank is not None:
+                if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
+                    embedding_ranks = [ranks[0],
+                                       ranks[pipeline_model_parallel_split_rank],
+                                       ranks[-1]]
+                if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
+                    position_embedding_ranks = [ranks[0],
+                                       ranks[pipeline_model_parallel_split_rank]]
         else:
             embedding_ranks = ranks
             position_embedding_ranks = ranks
