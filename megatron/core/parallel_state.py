@@ -124,8 +124,8 @@ def initialize_model_components_parallel(
             )
 
     if pipeline_model_parallel_split_rank is not None:
-            global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
-            _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = pipeline_model_parallel_split_rank
+        global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
+        _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = pipeline_model_parallel_split_rank
 
     rank = torch.distributed.get_rank()
 
@@ -150,11 +150,14 @@ def initialize_model_components_parallel(
                     _DATA_PARALLEL_GROUP_GLOO = group_gloo
                     _DATA_PARALLEL_GLOBAL_RANKS = ranks
 
+    first_component_name = list(parallelization_specs.keys())[0] 
+    last_component_name = list(parallelization_specs.keys())[-1]
+
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP
     assert _MODEL_PARALLEL_GROUP is None, 'model parallel group is already initialized'
     # TODO: need to modify for fan-in/out
-    for i in range(data_parallel_group_sizes[k]):
+    for i in range(data_parallel_group_sizes[first_component_name]):
         ranks = []
         for k in parallelization_specs:
             for data_parallel_group_ranks in all_data_parallel_group_ranks[k]:
@@ -188,8 +191,6 @@ def initialize_model_components_parallel(
     global _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP
     global _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS
     global _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS
-    first_component_name = list(parallelization_specs.keys())[0] 
-    last_component_name = list(parallelization_specs.keys())[-1]
 
     # arrays to define full pipeline model parallel groups
     full_pipeline_model_parallel_groups = [[] for _ in range(all_num_pipeline_model_parallel_groups[first_component_name])]
@@ -324,215 +325,6 @@ def initialize_model_components_parallel(
                 group = torch.distributed.new_group(ranks)
                 if rank in ranks:
                     _AMAX_REDUCTION_GROUP = group
-
-    # Initialize global memory buffer
-    # This isn't really "parallel state" but there isn't another good place to
-    # put this. If we end up with a more generic initialization of megatron-core
-    # we could stick it there
-    _set_global_memory_buffer()
-    
-
-def initialize_model_parallel(
-    tensor_model_parallel_size: int = 1,
-    pipeline_model_parallel_size: int = 1,
-    virtual_pipeline_model_parallel_size: Optional[int] = None,
-    pipeline_model_parallel_split_rank: Optional[int] = None,
-    use_fp8: bool = False,
-) -> None:
-    """Initialize model data parallel groups.
-
-    Arguments:
-        tensor_model_parallel_size (int, default = 1):
-            The number of GPUs to split individual tensors across.
-
-        pipeline_model_parallel_size (int, default = 1):
-            The number of tensor parallel GPU groups to split the
-            Transformer layers across. For example, if
-            tensor_model_parallel_size is 4 and
-            pipeline_model_parallel_size is 2, the model will be split
-            into 2 groups of 4 GPUs.
-
-        virtual_pipeline_model_parallel_size (int, optional):
-            The number of stages that each pipeline group will have,
-            interleaving as necessary. If None, no interleaving is
-            performed. For example, if tensor_model_parallel_size is 1,
-            pipeline_model_parallel_size is 4,
-            virtual_pipeline_model_parallel_size is 2, and there are
-            16 transformer layers in the model, the model will be
-            split into 8 stages with two layers each and each GPU
-            would get 2 stages as such (layer number starting with 1):
-
-            GPU 0: [1, 2] [9, 10]
-            GPU 1: [3, 4] [11, 12]
-            GPU 2: [5, 6] [13, 14]
-            GPU 3: [7, 8] [15, 16]
-
-        pipeline_model_parallel_split_rank (int, optional):
-            For models with both an encoder and decoder, the rank in
-            pipeline to switch between encoder and decoder (i.e. the
-            first rank of the decoder). This allows the user to set
-            the pipeline parallel size of the encoder and decoder
-            independently. For example, if
-            pipeline_model_parallel_size is 8 and
-            pipeline_model_parallel_split_rank is 3, then ranks 0-2
-            will be the encoder and ranks 3-7 will be the decoder.
-
-        use_fp8 (bool, default = False):
-            Construct GPU groups needed for FP8 training, namely for
-            amax reduction across the product of the data-parallel and
-            tensor-parallel groups.
-
-    Let's say we have a total of 16 GPUs denoted by g0 ... g15 and we
-    use 2 GPUs to parallelize the model tensor, and 4 GPUs to parallelize
-    the model pipeline. The present function will
-    create 8 tensor model-parallel groups, 4 pipeline model-parallel groups
-    and 8 data-parallel groups as:
-        8 data_parallel groups:
-            [g0, g2], [g1, g3], [g4, g6], [g5, g7], [g8, g10], [g9, g11], [g12, g14], [g13, g15]
-        8 tensor model-parallel groups:
-            [g0, g1], [g2, g3], [g4, g5], [g6, g7], [g8, g9], [g10, g11], [g12, g13], [g14, g15]
-        4 pipeline model-parallel groups:
-            [g0, g4, g8, g12], [g1, g5, g9, g13], [g2, g6, g10, g14], [g3, g7, g11, g15]
-    Note that for efficiency, the caller should make sure adjacent ranks
-    are on the same DGX box. For example if we are using 2 DGX-1 boxes
-    with a total of 16 GPUs, rank 0 to 7 belong to the first box and
-    ranks 8 to 15 belong to the second box.
-
-    """
-    # Get world size and rank. Ensure some consistencies.
-    assert torch.distributed.is_initialized()
-    world_size: int = torch.distributed.get_world_size()
-
-    if world_size % (tensor_model_parallel_size * pipeline_model_parallel_size) != 0:
-        raise RuntimeError(
-            f"world_size ({world_size}) is not divisible by tensor_model_parallel_size "
-            f"({tensor_model_parallel_size}) x pipeline_model_parallel_size ({pipeline_model_parallel_size})"
-        )
-
-    data_parallel_size: int = world_size // (tensor_model_parallel_size *
-                                             pipeline_model_parallel_size)
-
-    num_tensor_model_parallel_groups: int  = world_size // tensor_model_parallel_size
-    num_pipeline_model_parallel_groups: int = world_size // pipeline_model_parallel_size
-    num_data_parallel_groups: int = world_size // data_parallel_size
-
-    if virtual_pipeline_model_parallel_size is not None:
-        if not pipeline_model_parallel_size > 2:
-            raise RuntimeError("pipeline-model-parallel size should be greater than 2 with "
-                               "interleaved schedule")
-        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
-        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
-        _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = 0
-        _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = virtual_pipeline_model_parallel_size
-
-    if pipeline_model_parallel_split_rank is not None:
-        global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
-        _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = pipeline_model_parallel_split_rank
-
-    rank = torch.distributed.get_rank()
-
-    # Build the data-parallel groups.
-    global _DATA_PARALLEL_GROUP
-    global _DATA_PARALLEL_GROUP_GLOO
-    global _DATA_PARALLEL_GLOBAL_RANKS
-    assert _DATA_PARALLEL_GROUP is None, 'data parallel group is already initialized'
-    all_data_parallel_group_ranks = []
-    for i in range(pipeline_model_parallel_size):
-        start_rank = i * num_pipeline_model_parallel_groups
-        end_rank = (i + 1) * num_pipeline_model_parallel_groups
-        for j in range(tensor_model_parallel_size):
-            ranks = range(start_rank + j, end_rank, tensor_model_parallel_size)
-            all_data_parallel_group_ranks.append(list(ranks))
-            group = torch.distributed.new_group(ranks)
-            group_gloo = torch.distributed.new_group(ranks, backend="gloo")
-            if rank in ranks:
-                _DATA_PARALLEL_GROUP = group
-                _DATA_PARALLEL_GROUP_GLOO = group_gloo
-                _DATA_PARALLEL_GLOBAL_RANKS = ranks
-
-    # Build the model-parallel groups.
-    global _MODEL_PARALLEL_GROUP
-    assert _MODEL_PARALLEL_GROUP is None, 'model parallel group is already initialized'
-    for i in range(data_parallel_size):
-        ranks = [data_parallel_group_ranks[i]
-                 for data_parallel_group_ranks in all_data_parallel_group_ranks]
-        group = torch.distributed.new_group(ranks)
-        if rank in ranks:
-            _MODEL_PARALLEL_GROUP = group
-
-    # Build the tensor model-parallel groups.
-    global _TENSOR_MODEL_PARALLEL_GROUP
-    assert _TENSOR_MODEL_PARALLEL_GROUP is None, \
-        'tensor model parallel group is already initialized'
-    for i in range(num_tensor_model_parallel_groups):
-        ranks = range(i * tensor_model_parallel_size,
-                      (i + 1) * tensor_model_parallel_size)
-        group = torch.distributed.new_group(ranks)
-        if rank in ranks:
-            _TENSOR_MODEL_PARALLEL_GROUP = group
-
-    # Build the pipeline model-parallel groups and embedding groups
-    # (first and last rank in each pipeline model-parallel group).
-    global _PIPELINE_COMPONENT_PARALLEL_GROUP
-    global _PIPELINE_GLOBAL_RANKS
-    assert _PIPELINE_COMPONENT_PARALLEL_GROUP is None, \
-        'pipeline model parallel group is already initialized'
-    global _EMBEDDING_GROUP
-    global _EMBEDDING_GLOBAL_RANKS
-    assert _EMBEDDING_GROUP is None, 'embedding group is already initialized'
-    global _POSITION_EMBEDDING_GROUP
-    global _POSITION_EMBEDDING_GLOBAL_RANKS
-    assert _POSITION_EMBEDDING_GROUP is None, \
-        'position embedding group is already initialized'
-    for i in range(num_pipeline_model_parallel_groups):
-        ranks = range(i, world_size, num_pipeline_model_parallel_groups)
-        group = torch.distributed.new_group(ranks)
-        if rank in ranks:
-            _PIPELINE_COMPONENT_PARALLEL_GROUP = group
-            _PIPELINE_GLOBAL_RANKS = ranks
-        # Setup embedding group (to exchange gradients between
-        # first and last stages).
-        if len(ranks) > 1:
-            embedding_ranks = [ranks[0], ranks[-1]]
-            position_embedding_ranks = [ranks[0]]
-            if pipeline_model_parallel_split_rank is not None:
-                if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
-                    embedding_ranks = [ranks[0],
-                                       ranks[pipeline_model_parallel_split_rank],
-                                       ranks[-1]]
-                if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
-                    position_embedding_ranks = [ranks[0],
-                                       ranks[pipeline_model_parallel_split_rank]]
-        else:
-            embedding_ranks = ranks
-            position_embedding_ranks = ranks
-
-        group = torch.distributed.new_group(embedding_ranks)
-        if rank in embedding_ranks:
-            _EMBEDDING_GROUP = group
-        if rank in ranks:
-            _EMBEDDING_GLOBAL_RANKS = embedding_ranks
-
-        group = torch.distributed.new_group(position_embedding_ranks)
-        if rank in position_embedding_ranks:
-            _POSITION_EMBEDDING_GROUP = group
-        if rank in ranks:
-            _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
-
-    # Build the FP8 groups.
-    global _AMAX_REDUCTION_GROUP
-    assert _AMAX_REDUCTION_GROUP is None, \
-        'FP8 amax reduction group is already initialized'
-    if use_fp8:
-        amax_group_size: int = tensor_model_parallel_size * data_parallel_size
-        num_amax_groups: int = world_size // amax_group_size
-        for i in range(num_amax_groups):
-            start_rank = i * amax_group_size
-            end_rank = (i + 1) * amax_group_size
-            ranks = range(start_rank, end_rank)
-            group = torch.distributed.new_group(ranks)
-            if rank in ranks:
-                _AMAX_REDUCTION_GROUP = group
 
     # Initialize global memory buffer
     # This isn't really "parallel state" but there isn't another good place to
