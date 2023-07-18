@@ -158,7 +158,7 @@ def _batched_p2p_ops_w_components(*,
                      tensor_recv_next: Optional[torch.Tensor],
                      prev_group: torch.distributed.ProcessGroup,
                      next_group: torch.distributed.ProcessGroup):
-    print("Using batched p2pOps with components")
+    print("Using batched p2pOps with components. send_prev: {tensor_send_prev is not None}, recv_prec: {tensor_recv_prev is not None}, send_next: {tensor_send_next is not None}, recv_next: {tensor_recv_next is not None}")
     ops = []
     if tensor_send_prev is not None:
         send_prev_op = torch.distributed.P2POp(
