@@ -119,7 +119,7 @@ def _batched_p2p_ops(*,
                      tensor_send_next: Optional[torch.Tensor],
                      tensor_recv_next: Optional[torch.Tensor],
                      group: torch.distributed.ProcessGroup):
-    print("Using batched p2pOps without components")
+    # print("Using batched p2pOps without components")
     ops = []
     if tensor_send_prev is not None:
         send_prev_op = torch.distributed.P2POp(
@@ -158,7 +158,7 @@ def _batched_p2p_ops_w_components(*,
                      tensor_recv_next: Optional[torch.Tensor],
                      prev_group: torch.distributed.ProcessGroup,
                      next_group: torch.distributed.ProcessGroup):
-    print(f"Using batched p2pOps with components. send_prev: {tensor_send_prev is not None}, recv_prec: {tensor_recv_prev is not None}, send_next: {tensor_send_next is not None}, recv_next: {tensor_recv_next is not None}")
+    # print(f"Using batched p2pOps with components. send_prev: {tensor_send_prev is not None}, recv_prec: {tensor_recv_prev is not None}, send_next: {tensor_send_next is not None}, recv_next: {tensor_recv_next is not None}")
     ops = []
     if tensor_send_prev is not None:
         send_prev_op = torch.distributed.P2POp(
@@ -196,7 +196,7 @@ def _p2p_ops(*,
              tensor_send_next: Optional[torch.Tensor],
              tensor_recv_next: Optional[torch.Tensor],
              group: torch.distributed.ProcessGroup):
-    print("Using p2pOps without components")
+    # print("Using p2pOps without components")
     reqs = []
     rank = get_pipeline_model_parallel_rank()
     if get_pipeline_model_parallel_rank() % 2 == 0:
@@ -273,7 +273,7 @@ def _p2p_ops_w_components(*,
              tensor_recv_next: Optional[torch.Tensor],
              prev_group: torch.distributed.ProcessGroup = None,
              next_group: torch.distributed.ProcessGroup = None):
-    print("Using p2pOps with components")
+    # print("Using p2pOps with components")
     reqs = []
     rank = get_pipeline_component_parallel_rank()
     if get_pipeline_component_parallel_rank() % 2 == 0:
