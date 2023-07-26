@@ -119,6 +119,7 @@ def _batched_p2p_ops(*,
                      tensor_send_next: Optional[torch.Tensor],
                      tensor_recv_next: Optional[torch.Tensor],
                      group: torch.distributed.ProcessGroup):
+    # print("Using batched p2pOps without components")
     ops = []
     if tensor_send_prev is not None:
         send_prev_op = torch.distributed.P2POp(
@@ -157,6 +158,7 @@ def _batched_p2p_ops_w_components(*,
                      tensor_recv_next: Optional[torch.Tensor],
                      prev_group: torch.distributed.ProcessGroup,
                      next_group: torch.distributed.ProcessGroup):
+    # print(f"Using batched p2pOps with components. send_prev: {tensor_send_prev is not None}, recv_prec: {tensor_recv_prev is not None}, send_next: {tensor_send_next is not None}, recv_next: {tensor_recv_next is not None}")
     ops = []
     if tensor_send_prev is not None:
         send_prev_op = torch.distributed.P2POp(
@@ -194,6 +196,7 @@ def _p2p_ops(*,
              tensor_send_next: Optional[torch.Tensor],
              tensor_recv_next: Optional[torch.Tensor],
              group: torch.distributed.ProcessGroup):
+    # print("Using p2pOps without components")
     reqs = []
     rank = get_pipeline_model_parallel_rank()
     if get_pipeline_model_parallel_rank() % 2 == 0:
@@ -270,6 +273,7 @@ def _p2p_ops_w_components(*,
              tensor_recv_next: Optional[torch.Tensor],
              prev_group: torch.distributed.ProcessGroup = None,
              next_group: torch.distributed.ProcessGroup = None):
+    # print("Using p2pOps with components")
     reqs = []
     rank = get_pipeline_component_parallel_rank()
     if get_pipeline_component_parallel_rank() % 2 == 0:
@@ -494,6 +498,7 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
     return tensor_recv_prev, tensor_recv_next, reqs
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def recv_forward(tensor_shape: Shape,
                  dtype: torch.dtype,
                  batch_p2p_comm: bool = True,
@@ -522,6 +527,7 @@ def recv_forward(tensor_shape: Shape,
     return input_tensor
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def recv_backward(tensor_shape: Shape,
                   dtype: torch.dtype,
                   batch_p2p_comm: bool = True,
@@ -548,6 +554,7 @@ def recv_backward(tensor_shape: Shape,
     return output_tensor_grad
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def send_forward(output_tensor: torch.Tensor,
                  batch_p2p_comm: bool = True,
                  timers: Callable = None) -> None:
@@ -573,6 +580,7 @@ def send_forward(output_tensor: torch.Tensor,
             timers('forward-send').stop()
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def send_backward(input_tensor_grad: torch.Tensor,
                   batch_p2p_comm: bool = True,
                   timers: Callable = None) -> None:
@@ -595,6 +603,7 @@ def send_backward(input_tensor_grad: torch.Tensor,
             timers('backward-send').stop()
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def send_forward_recv_backward(output_tensor: torch.Tensor,
                                tensor_shape: Shape,
                                dtype: torch.dtype,
@@ -622,6 +631,7 @@ def send_forward_recv_backward(output_tensor: torch.Tensor,
     return output_tensor_grad
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def send_backward_recv_forward(input_tensor_grad: torch.Tensor,
                                tensor_shape: Shape,
                                dtype: torch.dtype,
@@ -649,6 +659,7 @@ def send_backward_recv_forward(input_tensor_grad: torch.Tensor,
     return input_tensor
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def send_forward_recv_forward(output_tensor: torch.Tensor,
                               recv_prev: bool,
                               tensor_shape: Shape,
@@ -678,6 +689,7 @@ def send_forward_recv_forward(output_tensor: torch.Tensor,
     return input_tensor
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
                                 recv_next: bool,
                                 tensor_shape: Shape,
@@ -707,6 +719,7 @@ def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
     return output_tensor_grad
 
 
+@nvtx.annotate(color="blue", category="p2p_op")
 def send_forward_backward_recv_forward_backward(
         output_tensor: torch.Tensor,
         input_tensor_grad: torch.Tensor,
