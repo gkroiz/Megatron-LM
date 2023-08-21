@@ -9,12 +9,12 @@ import nvtx
 
 from megatron import core
 from megatron.core.parallel_state import (
-    get_pipeline_component_parallel_groups,
     get_pipeline_model_parallel_group,
-    get_pipeline_model_parallel_rank,
-    get_pipeline_model_parallel_prev_rank,
-    get_pipeline_model_parallel_next_rank,
-    get_using_layer_unit_test_strategy
+    get_pipeline_model_parallel_groups,
+    get_pipeline_model_parallel_prev_ranks,
+    get_pipeline_model_parallel_next_ranks,
+    get_using_layer_unit_test_strategy,
+    get_ranks_micro_batch_size
 )
 
 # Types
@@ -75,22 +75,22 @@ def _communicate_shapes(tensor_send_next, tensor_send_prev,
         if send_prev_shape_tensor is not None:
             send_prev_op = torch.distributed.P2POp(
                 torch.distributed.isend, send_prev_shape_tensor,
-                get_pipeline_model_parallel_prev_rank())
+                get_pipeline_model_parallel_prev_ranks())
             ops.append(send_prev_op)
         if recv_prev_shape_tensor is not None:
             recv_prev_op = torch.distributed.P2POp(
                 torch.distributed.irecv, recv_prev_shape_tensor,
-                get_pipeline_model_parallel_prev_rank())
+                get_pipeline_model_parallel_prev_ranks())
             ops.append(recv_prev_op)
         if send_next_shape_tensor is not None:
             send_next_op = torch.distributed.P2POp(
                 torch.distributed.isend, send_next_shape_tensor,
-                get_pipeline_model_parallel_next_rank())
+                get_pipeline_model_parallel_next_ranks())
             ops.append(send_next_op)
         if recv_next_shape_tensor is not None:
             recv_next_op = torch.distributed.P2POp(
                 torch.distributed.irecv, recv_next_shape_tensor,
-                get_pipeline_model_parallel_next_rank())
+                get_pipeline_model_parallel_next_ranks())
             ops.append(recv_next_op)
         if len(ops) > 0:
             reqs = torch.distributed.batch_isend_irecv(ops)
@@ -121,25 +121,25 @@ def _batched_p2p_ops(*,
     if tensor_send_prev is not None:
         send_prev_op = torch.distributed.P2POp(
             torch.distributed.isend, tensor_send_prev,
-            get_pipeline_model_parallel_prev_rank(),
+            get_pipeline_model_parallel_prev_ranks(),
             group)
         ops.append(send_prev_op)
     if tensor_recv_prev is not None:
         recv_prev_op = torch.distributed.P2POp(
             torch.distributed.irecv, tensor_recv_prev,
-            get_pipeline_model_parallel_prev_rank(),
+            get_pipeline_model_parallel_prev_ranks(),
             group)
         ops.append(recv_prev_op)
     if tensor_send_next is not None:
         send_next_op = torch.distributed.P2POp(
             torch.distributed.isend, tensor_send_next,
-            get_pipeline_model_parallel_next_rank(),
+            get_pipeline_model_parallel_next_ranks(),
             group)
         ops.append(send_next_op)
     if tensor_recv_next is not None:
         recv_next_op = torch.distributed.P2POp(
             torch.distributed.irecv, tensor_recv_next,
-            get_pipeline_model_parallel_next_rank(),
+            get_pipeline_model_parallel_next_ranks(),
             group)
         ops.append(recv_next_op)
     if len(ops) > 0:
@@ -150,47 +150,62 @@ def _batched_p2p_ops(*,
 
 def _batched_p2p_ops_w_components(*,
                      tensor_send_prev: Optional[torch.Tensor],
-                     tensos_recv_prev: Optional[torch.Tensor],
+                     tensors_recv_prev: Optional[torch.Tensor],
                      tensor_send_next: Optional[torch.Tensor],
                      tensors_recv_next: Optional[torch.Tensor],
-                     prev_groups: torch.distributed.ProcessGroup,
-                     next_groups: torch.distributed.ProcessGroup):
+                     groups: List[torch.distributed.ProcessGroup]):
     ops = []
     if tensor_send_prev is not None:
-        num_groups = len(prev_groups)
+        num_groups = len(groups)
         # if fan-in, num_groups = 1
+        if num_groups == 1:
+            split_tensors = [tensor_send_prev]
         # if fan-out, num_groups > 1
-        split_tensors = tensor_send_prev.chunk(num_groups)
-        for i, _ in enumerate(prev_groups):
+        elif num_groups > 1:
+            split_sections = [
+                get_ranks_micro_batch_size(prev_node) for prev_node in get_pipeline_model_parallel_prev_ranks()[i]
+            ]
+            split_tensors = torch.split(tensor_send_prev, split_sections, dim=1)
+        else:
+            raise ValueError("This error message should not appear, please file a bug.")
+        for i, group in enumerate(groups):
             send_prev_op = torch.distributed.P2POp(
                 torch.distributed.isend, split_tensors[i],
-                get_pipeline_model_parallel_prev_rank(),
-                prev_groups[i])
+                get_pipeline_model_parallel_prev_ranks()[i],
+                group)
             ops.append(send_prev_op)
     if tensors_recv_prev is not None:
-        for i, _ in enumerate(prev_groups):
+        for i, _ in enumerate(groups):
             recv_prev_op = torch.distributed.P2POp(
                 torch.distributed.irecv, tensors_recv_prev[i],
-                get_pipeline_model_parallel_prev_rank(),
-                prev_groups[i])
+                get_pipeline_model_parallel_prev_ranks()[i],
+                groups[i])
             ops.append(recv_prev_op)
     if tensor_send_next is not None:
-        num_groups = len(next_groups)
+        num_groups = len(groups)
         # if fan-in, num_groups = 1
+        if num_groups == 1:
+            split_tensors = [tensor_send_next]
         # if fan-out, num_groups > 1
-        split_tensors = tensor_send_next.chunk(num_groups)
-        for i, _ in enumerate(next_groups):
+        elif num_groups >= 1:
+            split_sections = [
+                get_ranks_micro_batch_size(next_node) for next_node in get_pipeline_model_parallel_next_ranks()[i]
+            ]
+            split_tensors = torch.split(tensor_send_next, split_sections, dim=1)
+        else:
+            raise ValueError("This error message should not appear, please file a bug.")
+        for i, group in enumerate(groups):
             send_next_op = torch.distributed.P2POp(
                 torch.distributed.isend, split_tensors[i],
-                get_pipeline_model_parallel_next_rank(),
-                next_groups[i])
+                get_pipeline_model_parallel_next_ranks()[i],
+                group)
             ops.append(send_next_op)
     if tensors_recv_next is not None:
-        for i, _ in enumerate(next_groups):
+        for i, _ in enumerate(groups):
             recv_next_op = torch.distributed.P2POp(
                 torch.distributed.irecv, tensors_recv_next[i],
-                get_pipeline_model_parallel_next_rank(),
-                next_groups[i])
+                get_pipeline_model_parallel_next_ranks()[i],
+                groups[i])
             ops.append(recv_next_op)
     if len(ops) > 0:
         reqs = torch.distributed.batch_isend_irecv(ops)
@@ -208,7 +223,7 @@ def _p2p_ops(*,
     if tensor_send_next is not None:
         send_next_req = torch.distributed.isend(
             tensor=tensor_send_next,
-            dst=get_pipeline_model_parallel_next_rank(),
+            dst=get_pipeline_model_parallel_next_ranks(),
             group=group,
         )
         reqs.append(send_next_req)
@@ -216,7 +231,7 @@ def _p2p_ops(*,
     if tensor_recv_prev is not None:
         recv_prev_req = torch.distributed.irecv(
             tensor=tensor_recv_prev,
-            src=get_pipeline_model_parallel_prev_rank(),
+            src=get_pipeline_model_parallel_prev_ranks(),
             group=group,
         )
         reqs.append(recv_prev_req)
@@ -224,7 +239,7 @@ def _p2p_ops(*,
     if tensor_send_prev is not None:
         send_prev_req = torch.distributed.isend(
             tensor=tensor_send_prev,
-            dst=get_pipeline_model_parallel_prev_rank(),
+            dst=get_pipeline_model_parallel_prev_ranks(),
             group=group,
         )
         reqs.append(send_prev_req)
@@ -232,7 +247,7 @@ def _p2p_ops(*,
     if tensor_recv_next is not None:
         recv_next_req = torch.distributed.irecv(
             tensor=tensor_recv_next,
-            src=get_pipeline_model_parallel_next_rank(),
+            src=get_pipeline_model_parallel_next_ranks(),
             group=group,
         )
         reqs.append(recv_next_req)
@@ -243,50 +258,52 @@ def _p2p_ops_w_components(*,
              tensors_recv_prev: Optional[torch.Tensor],
              tensor_send_next: Optional[torch.Tensor],
              tensors_recv_next: Optional[torch.Tensor],
-             prev_groups: torch.distributed.ProcessGroup = None,
-             next_groups: torch.distributed.ProcessGroup = None):
+             groups: List[torch.distributed.ProcessGroup] = None):
     reqs = []
     if tensor_send_next is not None:
-        num_groups = len(next_groups)
+        num_groups = len(groups)
         # if fan-in (from current rank), num_groups = 1
+        if num_groups == 1:
+            split_tensors = [tensor_send_next]
         # if fan-out (from current rank), num_groups > 1
-        split_tensors = tensor_send_next.chunk(num_groups)
-        for i, _ in enumerate(next_groups):
+        else:
+            split_tensors = tensor_send_next.chunk(num_groups)
+        for i, _ in enumerate(groups):
             send_next_req = torch.distributed.isend(
                 tensor=split_tensors[i],
-                dst=get_pipeline_model_parallel_next_rank(),
-                group=next_groups[i],
+                dst=get_pipeline_model_parallel_next_ranks()[i],
+                group=groups[i],
             )
             reqs.append(send_next_req)
 
     if tensors_recv_prev is not None:
-        for i, _ in enumerate(prev_groups):
+        for i, _ in enumerate(groups):
             recv_prev_req = torch.distributed.irecv(
                 tensor=tensors_recv_prev[i],
-                src=get_pipeline_model_parallel_prev_rank(),
-                group=prev_groups[i],
+                src=get_pipeline_model_parallel_prev_ranks()[i],
+                group=groups[i],
             )
             reqs.append(recv_prev_req)
 
     if tensor_send_prev is not None:
-        num_groups = len(prev_groups)
+        num_groups = len(groups)
         # if fan-in (from current rank), num_groups = 1
         # if fan-out (from current rank), num_groups > 1
         split_tensors = tensor_send_prev.chunk(num_groups)
-        for i, _ in enumerate(prev_groups):
+        for i in range(num_groups):
             send_prev_req = torch.distributed.isend(
                 tensor=split_tensors[i],
-                dst=get_pipeline_model_parallel_prev_rank(),
-                group=prev_groups[i],
+                dst=get_pipeline_model_parallel_prev_ranks()[i],
+                group=groups[i],
             )
             reqs.append(send_prev_req)
 
     if tensors_recv_next is not None:
-        for i, _ in enumerate(next_groups):
+        for i, _ in enumerate(groups):
             recv_next_req = torch.distributed.irecv(
                 tensor=tensors_recv_next[i],
-                src=get_pipeline_model_parallel_next_rank(),
-                group=next_groups[i],
+                src=get_pipeline_model_parallel_next_ranks()[i],
+                group=groups[i],
             )
             reqs.append(recv_next_req)
 
@@ -416,38 +433,49 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
         p2p_func = _p2p_ops_w_components if get_using_layer_unit_test_strategy() else _p2p_ops
 
     if get_using_layer_unit_test_strategy():
-        prev_groups, next_groups = None, None
         tensors_recv_prev, tensors_recv_next = None, None
-        if (tensor_recv_prev is not None) or (tensor_send_prev is not None):
-            prev_groups = get_pipeline_component_parallel_groups('prev')
-            num_groups = len(prev_groups)
-            split_tensors = tensor_send_prev.chunk(num_groups)
-            if tensor_recv_prev is not None:
-                tensors_recv_prev = []
-                # if fan-in (from current rank), len(tensors_recv_prev) = 1
-                # if fan-out (from current rank), len(tensors_recv_prev) > 1
-                for i, _ in enumerate(prev_groups):
-                    tensors_recv_prev.append(torch.clone(split_tensors[i]))
-        if (tensor_recv_next is not None) or (tensor_send_next is not None):
-            next_groups = get_pipeline_component_parallel_groups('next')
-            if tensor_recv_next is not None:
-                tensors_recv_next = []
-                # if fan-in (from current rank), len(tensors_recv_prev) = 1
-                # if fan-out (from current rank), len(tensors_recv_prev) > 1
-                for next_group in next_groups:
-                    tensors_recv_next.append(torch.clone(tensor_recv_next))
+        if (tensor_recv_prev is not None):
+            prev_ranks = get_pipeline_model_parallel_prev_ranks()
+            # if fan-in (from current rank), len(tensors_recv_prev) = 1
+            if len(prev_ranks) == 1:
+                split_tensors = [tensor_recv_prev]
+            # if fan-out (from current rank), len(tensors_recv_prev) > 1
+            elif len(prev_ranks) > 1:
+                split_sections = [
+                    get_ranks_micro_batch_size(prev_node) for prev_node in get_pipeline_model_parallel_prev_ranks()[i]
+                ]
+                # check that the split sections add up to the micro_batch_size
+                assert sum(split_sections) == tensor_recv_prev.size()[1]
+                split_tensors = torch.split(tensor_recv_prev, split_sections, dim=1)
+            tensors_recv_prev = []
+            for i, _ in enumerate(prev_ranks):
+                tensors_recv_prev.append(split_tensors[i])
+        if (tensor_recv_next is not None):
+            next_ranks = get_pipeline_model_parallel_next_ranks()
+            # if fan-in (from current rank), len(tensors_recv_next) = 1
+            if len(next_ranks) == 1:
+                split_tensors = [tensor_recv_next]
+            # if fan-out (from current rank), len(tensors_recv_next) > 1
+            elif len(next_ranks) > 1:
+                split_sections = [
+                    get_ranks_micro_batch_size(next_node) for next_node in get_pipeline_model_parallel_next_ranks()[i]
+                ]
+                # check that the split sections add up to the micro_batch_size
+                assert sum(split_sections) == tensor_recv_prev.size()[1]
+                split_tensors = torch.split(tensor_recv_next, split_sections, dim=1)
+            tensors_recv_next = []
+            for i, _ in enumerate(next_ranks):
+                tensors_recv_next.append(split_tensors[i])
 
         # need to define all tensors here
 
         # if there are multiple prev_groups, fan in, tensor size should remain the same
         # if there are multiple next_groups, fan out, tensor size should be split
-
         reqs = p2p_func(tensor_send_prev=tensor_send_prev,
-                    tensor_recv_prev=tensors_recv_prev,
-                    tensor_send_next=tensor_send_next,
-                    tensor_recv_next=tensors_recv_next,
-                    prev_group=prev_groups,
-                    next_group=next_groups)
+                        tensors_recv_prev=tensors_recv_prev,
+                        tensor_send_next=tensor_send_next,
+                        tensors_recv_next=tensors_recv_next,
+                        groups=get_pipeline_model_parallel_groups())
     else:
         reqs = p2p_func(tensor_send_prev=tensor_send_prev,
                         tensor_recv_prev=tensor_recv_prev,
@@ -467,8 +495,10 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
 
     # TODO: combine tensors for fan-in
     if get_using_layer_unit_test_strategy():
-        tensor_recv_prev = torch.cat(tensors_recv_prev)
-        tensor_recv_next = torch.cat(tensors_recv_next)
+        if tensors_recv_prev is not None:
+            tensor_recv_prev = torch.cat(tensors_recv_prev)
+        if tensors_recv_next is not None:
+            tensor_recv_next = torch.cat(tensors_recv_next)
 
     return tensor_recv_prev, tensor_recv_next, reqs
 

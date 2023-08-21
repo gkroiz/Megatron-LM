@@ -13,20 +13,16 @@ _TENSOR_MODEL_PARALLEL_GROUP = None
 # Inter-layer model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = []
 # Model parallel group (both intra- and pipeline) that the current rank belongs to.
-_MODEL_PARALLEL_GROUP = None
+_MODEL_PARALLEL_GROUP = []
 # Embedding group.
-_EMBEDDING_GROUP = None
+_EMBEDDING_GROUP = []
 # Position embedding group.
-_POSITION_EMBEDDING_GROUP = None
+_POSITION_EMBEDDING_GROUP = []
 # Data parallel group that the current rank belongs to.
 _DATA_PARALLEL_GROUP = None
 _DATA_PARALLEL_GROUP_GLOO = None
 # FP8 amax reduction group.
 _AMAX_REDUCTION_GROUP = None
-# Previous component pipeline group that the current rank belongs to.
-_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
-# Next component pipeline group that the current rank belongs to.
-_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
 
 # Previous pipeline model rank based on current rank.
 _PREV_PIPELINE_MODEL_PARALLEL_RANK = []
@@ -41,8 +37,12 @@ _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
 _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = None
 
-# mappings of all pipeline parallel groups with data_split_ratio
-_MAPPINGS = {}
+# Mappings of all pipeline parallel groups with data_split_ratio
+_FWD_MAPPINGS = {}
+_BKWD_MAPPINGS = {}
+
+# Dictionary of the micro_batch_sizes for each rank
+_ALL_RANKS_MICRO_BATCH_SIZES = {}
 
 # These values enable us to change the mpu sizes on the fly.
 _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
@@ -53,22 +53,15 @@ _MPU_PIPELINE_MODEL_PARALLEL_RANK = None
 _MPU_PIPELINE_COMPONENT_PARALLEL_RANK = None
 
 # A list of ranks that have a copy of the embedding.
-_EMBEDDING_GLOBAL_RANKS = None
+_EMBEDDING_GLOBAL_RANKS = []
 
 # A list of ranks that have a copy of the position embedding.
-_POSITION_EMBEDDING_GLOBAL_RANKS = None
+_POSITION_EMBEDDING_GLOBAL_RANKS = []
 
 # A list of global ranks for each pipeline group to ease calculation of the source
 # rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_GLOBAL_RANKS = []
-
-# A list of global ranks for each pipeline component group to ease calculation of the source
-# rank when broadcasting from the first or last pipeline stage.
 _PIPELINE_COMPONENT_GLOBAL_RANKS = None
-
-# A list of global ranks in the next/prev component pipeline parallel groups
-_NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS = []
-_PREV_COMPONENT_PIPELINE_GLOBAL_RANKS = []
 
 # A list of global ranks for each data parallel group to ease calculation of the source
 # rank when broadcasting weights from src to all other data parallel ranks
@@ -207,13 +200,13 @@ def initialize_model_parallel(
 
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP
-    assert _MODEL_PARALLEL_GROUP is None, 'model parallel group is already initialized'
+    assert len(_MODEL_PARALLEL_GROUP) == 0, 'model parallel group is already initialized'
     for i in range(data_parallel_size):
         ranks = [data_parallel_group_ranks[i]
                  for data_parallel_group_ranks in all_data_parallel_group_ranks]
         group = torch.distributed.new_group(ranks)
         if rank in ranks:
-            _MODEL_PARALLEL_GROUP = group
+            _MODEL_PARALLEL_GROUP.append(group)
 
     # Build the tensor model-parallel groups.
     global _TENSOR_MODEL_PARALLEL_GROUP
@@ -234,10 +227,10 @@ def initialize_model_parallel(
         'pipeline model parallel group is already initialized'
     global _EMBEDDING_GROUP
     global _EMBEDDING_GLOBAL_RANKS
-    assert _EMBEDDING_GROUP is None, 'embedding group is already initialized'
+    assert len(_EMBEDDING_GROUP) == 0, 'embedding group is already initialized'
     global _POSITION_EMBEDDING_GROUP
     global _POSITION_EMBEDDING_GLOBAL_RANKS
-    assert _POSITION_EMBEDDING_GROUP is None, \
+    assert len(_POSITION_EMBEDDING_GROUP) == 0, \
         'position embedding group is already initialized'
     for i in range(num_pipeline_model_parallel_groups):
         ranks = range(i, world_size, num_pipeline_model_parallel_groups)
@@ -264,15 +257,15 @@ def initialize_model_parallel(
 
         group = torch.distributed.new_group(embedding_ranks)
         if rank in embedding_ranks:
-            _EMBEDDING_GROUP = group
+            _EMBEDDING_GROUP.append(group)
         if rank in ranks:
-            _EMBEDDING_GLOBAL_RANKS = embedding_ranks
+            _EMBEDDING_GLOBAL_RANKS.append(embedding_ranks)
 
         group = torch.distributed.new_group(position_embedding_ranks)
         if rank in position_embedding_ranks:
-            _POSITION_EMBEDDING_GROUP = group
+            _POSITION_EMBEDDING_GROUP.append(group)
         if rank in ranks:
-            _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
+            _POSITION_EMBEDDING_GLOBAL_RANKS.append(position_embedding_ranks)
 
     # Build the FP8 groups.
     global _AMAX_REDUCTION_GROUP
@@ -298,6 +291,8 @@ def initialize_model_parallel(
 
 def initialize_model_components_parallel(
     parallelization_specs: dict,
+    micro_batch_size: int,
+    virtual_pipeline_model_parallel_size: Optional[int] = None,
     pipeline_model_parallel_split_rank: Optional[int] = None,
     use_fp8: bool = False,
 ) -> None:
@@ -360,6 +355,15 @@ def initialize_model_components_parallel(
                 f"({tensor_model_parallel_group_sizes[k]}) x pipeline_model_parallel_size ({pipeline_model_parallel_group_sizes[k]})"
             )
 
+    if virtual_pipeline_model_parallel_size is not None:
+        if not pipeline_model_parallel_size > 2:
+            raise RuntimeError("pipeline-model-parallel size should be greater than 2 with "
+                               "interleaved schedule")
+        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
+        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+        _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = 0
+        _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = virtual_pipeline_model_parallel_size
+
     if pipeline_model_parallel_split_rank is not None:
         global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
         _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = pipeline_model_parallel_split_rank
@@ -389,31 +393,6 @@ def initialize_model_components_parallel(
     last_component_name = list(parallelization_specs.keys())[-1]
     all_component_names = list(parallelization_specs.keys())
 
-    # Build the model-parallel groups.
-    global _MODEL_PARALLEL_GROUP
-    assert _MODEL_PARALLEL_GROUP is None, 'model parallel group is already initialized'
-
-    # find maximum number of data parallel groups in any component,
-    # this number will be the total number of model_parallel_groups
-    max_data_parallel_group_size = max(data_parallel_group_sizes.values())
-
-    for model_parallel_group_index in range(max_data_parallel_group_size):
-        ranks = []
-        
-        # for each model parallel_group, iterate through each component
-        for k in parallelization_specs:
-
-            # calculate model_parallel_group_index within a component
-            ratio = max_data_parallel_group_size / data_parallel_group_sizes[k]
-            component_model_parallel_group_index = int(model_parallel_group_index / ratio)
-
-            # get ranks for model_parallel_group within a component
-            for data_parallel_group in all_data_parallel_group_ranks[k]:
-                ranks.append(data_parallel_group[component_model_parallel_group_index])
-
-        group = torch.distributed.new_group(ranks)
-        if rank in ranks:
-            _MODEL_PARALLEL_GROUP = group
 
     # Build the tensor model-parallel groups.
     global _TENSOR_MODEL_PARALLEL_GROUP
@@ -427,100 +406,96 @@ def initialize_model_components_parallel(
             if rank in ranks:
                 _TENSOR_MODEL_PARALLEL_GROUP = group
 
-    # Build the pipeline model-parallel and component-parallel groups
-    global _PIPELINE_MODEL_PARALLEL_GROUP
-    global _PIPELINE_GLOBAL_RANKS
-    global _PIPELINE_COMPONENT_GLOBAL_RANKS
-    global _FIRST_PIPELINE_MODEL_PARALLEL_RANK
-    global _LAST_PIPELINE_MODEL_PARALLEL_RANK
-    global _PREV_PIPELINE_MODEL_PARALLEL_RANK
-    global _NEXT_PIPELINE_MODEL_PARALLEL_RANK
-    global _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS
-    global _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS
-    global _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS
-    global _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS
-
-    assert not len(_PIPELINE_MODEL_PARALLEL_GROUP), \
-        'pipeline model parallel group is already initialized'
-    
     # create graph connecting all gpu ranks based on pipeline_parallel groups
 
     list_all_num_pipeline_components_parallel_groups = list(all_num_pipeline_components_parallel_groups.values())
 
-    # dict that stores all node to node pipeline parallel mappings
-    global _MAPPINGS
-    assert len(_MAPPINGS) == 0
-    mappings = {}
+    # dict that stores all node to node pipeline parallel mappings for forward pass
+    global _FWD_MAPPINGS
+    assert len(_FWD_MAPPINGS) == 0
+    fwd_mappings = {}
+
+    global _ALL_RANKS_MICRO_BATCH_SIZES
+    assert len(_ALL_RANKS_MICRO_BATCH_SIZES) == 0
 
     # iterate through each pipeline component parallel group
     for i, k in enumerate(all_num_pipeline_components_parallel_groups):
         
         # iterate through each rank
         for gpu_rank in all_gpu_ranks[k]:
-            mappings[str(gpu_rank)] = []
+            
+            # set micro_batch_size if first component
+            if k == first_component_name:
+                set_ranks_micro_batch_size(gpu_rank, micro_batch_size)
+
+            fwd_mappings[str(gpu_rank)] = []
+            next_gpu_rank = gpu_rank + all_num_pipeline_components_parallel_groups[k]
             # gpu_rank mapping is within component
-            if (gpu_rank + all_num_pipeline_components_parallel_groups[k]) in all_gpu_ranks[k]:
-                mappings[str(gpu_rank)].append((gpu_rank + all_num_pipeline_components_parallel_groups[k], 1))
-            # gpu_rank mappin is in the next component
+            # define forward mapping from current rank to next rank and
+            # define the next rank's micro_batch_size
+            if next_gpu_rank in all_gpu_ranks[k]:
+                fwd_mappings[str(gpu_rank)].append((gpu_rank + all_num_pipeline_components_parallel_groups[k], get_ranks_micro_batch_size(gpu_rank)))
+                set_ranks_micro_batch_size(next_gpu_rank, get_ranks_micro_batch_size(gpu_rank))
+            # gpu_rank mapping is in the next component
             else:
                 # find the index within the respective data parallel group
                 data_parallel_group_index = None
                 for data_parallel_group_ranks in all_data_parallel_group_ranks[k]:
                     if gpu_rank in data_parallel_group_ranks:
                         data_parallel_group_index = data_parallel_group_ranks.index(gpu_rank)
-                
+
                 assert data_parallel_group_index is not None
                 tensor_parallel_group_index = gpu_rank % tensor_model_parallel_group_sizes[k]
-                
-                # ---------------------------------------------------------------------------------------------------
-                # create component groups and define how data splits during fan-in/out
-                # ---------------------------------------------------------------------------------------------------
-                # walkthrough example:
-                #     first component has data parallel group size of 3, pipeline parallel group size of 1
-                #     second component has data parallel group size of 2, pipeline parallel group size of 1
-                #     visual:
-                #
-                #       component 1   component 2
-                #     ------------------------------
-                #         | 0 |          | 3 |
-                #         | 1 |          | 4 |
-                #         | 2 |
-                #     ------------------------------
-                #     step 1 (create buckets):
-                #         FORMULA: b_i = i * ratio, 
-                #             where ratio is the num pipeline_component_parallel_groups of
-                #             the next component over current component
-                #         divide range [0,2] into 3 buckets, b_1 = [0, 0.66], b_2 = [0.66, 1.33], and b_3 = [1.33, 2]
-                #     step 2 (create clean buckets):
-                #         FORMULA: [x, y] -> [floor(x), ceil(y))
-                #         the resulting buckets will be b_clean_1 = [0,1), b_clean_2 = [0, 2), b_clean_3 = [1,2)
-                #     using the buckets, 
-                #     step 3 (define component groups and portion of data to send through each group):
-                #         FORMULA: gpu_rank i connects to all elements in b_clean_i
-                #           
-                #         gpu_rank 0 will connect to all elements in b_clean_1 (`[0, 1)`) of component 2, so gpu_rank 3
-                #         gpu_rank 1 will connect to all elements in b_clean_2 (`[0, 2)`) of component 2, so gpu_rank 3 and 4
-                #         gpu_rank 2 will connect to all elements in b_clean_3 (`[1, 2)`) of component 2, so gpu_rank 4
-                #
-                #         all component groupings: [0, 3], [1, 3], [1, 4], [2, 4]
-                #         now, since gpu_rank 0 (send) -> gpu_rank 3 (recv) and gpu_rank 2 (send) -> gpu_rank 4 (recv),
-                #         the the entire data slices will transfer from (send) to (recv).
-                #         for gpu_rank 1 (send), this shares its data between gpu_ranks between 3 and 4.
-                #         
-                #         step 3.5 (calculate data_split_ratio)
-                #         FORMULA: min(i+1, b_j[1]) - max(i, b_j[0]) / (b_j[1]-b_j[0]) for i in range(b_clean_j)
-                #         To calculate the data_split_ratio, iterate over redefined bucket, in this case 2 iterations
-                #         1) first iteration, i=0. Take subsection of redefined bucket, [0, 1)
-                #         2) calculate overlap between [0, 1) and the original bucket, [0.66, 1.33]:
-                #             min(1, 1.33) - max(0, 0.66) = 1 - 0.66 = 0.33
-                #         3) divide overlap by size of original bucket: 0.33 / (1.33-0.66) = 0.33 / 0.66 = 1/2
-                #         This means that for component 1->3, the data_split_ratio will be 1/2. This process can be repeated
-                #         For the second iteration to get that the data_split_ratio for component 1->4 is also 1/2
-                #              
-                #     final component groups with data_split_ratios
-                #     gpu_rank 0->3, ratio: 1, gpu_rank 1->3, ratio: 1/2, gpu_rank 1->4, ratio: 1/2, gpu_rank 2->4, 1
-                #     each receiving gpu_rank will recieve the same amount of data as the other receiving gpu_ranks
-                # ---------------------------------------------------------------------------------------------------
+
+                    # ---------------------------------------------------------------------------------------------------
+                    # create component groups and define how data splits during fan-in/out
+                    # ---------------------------------------------------------------------------------------------------
+                    # walkthrough example:
+                    #     first component has data parallel group size of 3, pipeline parallel group size of 1
+                    #     second component has data parallel group size of 2, pipeline parallel group size of 1
+                    #     visual:
+                    #
+                    #       component 1   component 2
+                    #     ------------------------------
+                    #         | 0 |          | 3 |
+                    #         | 1 |          | 4 |
+                    #         | 2 |
+                    #     ------------------------------
+                    #     step 1 (create buckets):
+                    #         FORMULA: b_i = i * ratio, 
+                    #             where ratio is the num pipeline_component_parallel_groups of
+                    #             the next component over current component
+                    #         divide range [0,2] into 3 buckets, b_1 = [0, 0.66], b_2 = [0.66, 1.33], and b_3 = [1.33, 2]
+                    #     step 2 (create clean buckets):
+                    #         FORMULA: [x, y] -> [floor(x), ceil(y))
+                    #         the resulting buckets will be b_clean_1 = [0,1), b_clean_2 = [0, 2), b_clean_3 = [1,2)
+                    #     using the buckets, 
+                    #     step 3 (define component groups and portion of data to send through each group):
+                    #         FORMULA: gpu_rank i connects to all elements in b_clean_i
+                    #
+                    #         gpu_rank 0 will connect to all elements in b_clean_1 (`[0, 1)`) of component 2, so gpu_rank 3
+                    #         gpu_rank 1 will connect to all elements in b_clean_2 (`[0, 2)`) of component 2, so gpu_rank 3 and 4
+                    #         gpu_rank 2 will connect to all elements in b_clean_3 (`[1, 2)`) of component 2, so gpu_rank 4
+                    #
+                    #         all component groupings: [0, 3], [1, 3], [1, 4], [2, 4]
+                    #         now, since gpu_rank 0 (send) -> gpu_rank 3 (recv) and gpu_rank 2 (send) -> gpu_rank 4 (recv),
+                    #         the the entire data slices will transfer from (send) to (recv).
+                    #         for gpu_rank 1 (send), this shares its data between gpu_ranks between 3 and 4.
+                    #
+                    #         step 3.5 (calculate data_split_ratio)
+                    #         FORMULA: min(i+1, b_j[1]) - max(i, b_j[0]) / (b_j[1]-b_j[0]) for i in range(b_clean_j)
+                    #         To calculate the data_split_ratio, iterate over redefined bucket, in this case 2 iterations
+                    #         1) first iteration, i=0. Take subsection of redefined bucket, [0, 1)
+                    #         2) calculate overlap between [0, 1) and the original bucket, [0.66, 1.33]:
+                    #             min(1, 1.33) - max(0, 0.66) = 1 - 0.66 = 0.33
+                    #         3) divide overlap by size of original bucket: 0.33 / (1.33-0.66) = 0.33 / 0.66 = 1/2
+                    #         This means that for component 1->3, the data_split_ratio will be 1/2. This process can be repeated
+                    #         For the second iteration to get that the data_split_ratio for component 1->4 is also 1/2
+                    #
+                    #     final component groups with data_split_ratios
+                    #     gpu_rank 0->3, ratio: 1, gpu_rank 1->3, ratio: 1/2, gpu_rank 1->4, ratio: 1/2, gpu_rank 2->4, 1
+                    #     each receiving gpu_rank will recieve the same amount of data as the other receiving gpu_ranks
+                    # ---------------------------------------------------------------------------------------------------
 
                 if k != last_component_name:
                     # step 1 (define the bucket)
@@ -531,34 +506,147 @@ def initialize_model_components_parallel(
                     # step 2 (redefine bucket)
                     floor_start = int(math.floor((data_parallel_group_index) * ratio))
                     ceil_end = int(math.ceil(((data_parallel_group_index+1)) * ratio))
-                    
+
                     # steps 3 (define compoennt groups within redefined bucket)
+                    new_nodes = []
                     for node in range(floor_start, ceil_end):
-                        
+
                         data_split_ratio = 1
                         if ceil_end-floor_start > 1:
                             divisor = end - start
                             overlap = min(node+1, end) - max(node, start)
                             data_split_ratio = overlap / divisor
-                        new_node = (
+                        new_node = [
                             list(all_data_parallel_group_ranks.values())[i+1][tensor_parallel_group_index][node],
-                            data_split_ratio
-                            )
+                            data_split_ratio * get_ranks_micro_batch_size(gpu_rank)
+                        ]
+                        new_nodes.append(new_node)
 
-                        mappings[str(gpu_rank)].append(new_node)
+                    # step 4 (define micro_batch_size for each foward mapping)
+                    if len(new_nodes) > 1:
+                        # fan-in/out will not always result in integer micro_batch_sizes.
+                        # 1) round down each non-integer micro_batch_size and add round down amount to remainder
+                        # 2) distribute remainder microbatches to the mappings with the smallest micro_batch_size
+                        remainder = 0
+                        for new_node in new_nodes:
+                            int_batch_size = 0
+
+                            # use math.isclose since there may be a precision issue
+                            if math.isclose(new_node[1], round(new_node[1])):
+                                new_node[1] = round(new_node[1])
+                            else:
+                                int_batch_size = int(new_node[1])
+                                remainder += new_node[1] - int_batch_size
+                                new_node[1] = int_batch_size
+                        # distribute remaining microbatches
+                        while remainder > 0:
+                            smallest_micro_batch_size = math.inf
+                            index_for_smallest_micro_batch_size = -1
+                            for index, new_node in enumerate(new_nodes):
+                                if new_node[1] < smallest_micro_batch_size:
+                                    smallest_micro_batch_size = new_node[1]
+                                    index_for_smallest_micro_batch_size = index
+
+                            new_nodes[index_for_smallest_micro_batch_size][1] += 1
+                            remainder -= 1
+
+                    else:
+                        new_nodes[0][1] = get_ranks_micro_batch_size(gpu_rank)
+
+                    # add new nodes to fwd_mapping
+                    for new_node in new_nodes:
+                        set_ranks_micro_batch_size(new_node[0], new_node[1])
+                        fwd_mappings[str(gpu_rank)].append(new_node)
+                else:
+                    if len(fwd_mappings[str(gpu_rank)]) == 0:
+                        set_ranks_micro_batch_size(gpu_rank, get_ranks_micro_batch_size(gpu_rank-all_num_tensor_model_parallel_groups[k]))
+
+    _FWD_MAPPINGS = fwd_mappings
+    assert len(_ALL_RANKS_MICRO_BATCH_SIZES) == sum(world_sizes.values()), \
+        "Something went wrong with defining _ALL_RANKS_MICRO_BATCH_SIZES, please file a bug."
+
+    # create same mapping but for backward step
+    global _BKWD_MAPPINGS
+    assert len(_BKWD_MAPPINGS) == 0
+    bkwd_mappings = {}
+
+    reversed_all_num_pipeline_components_parallel_groups = dict(reversed(list(all_num_pipeline_components_parallel_groups.items())))
+    reversed_list_all_num_pipeline_components_parallel_groups = list(reversed(list_all_num_pipeline_components_parallel_groups))
+    reversed_tensor_model_parallel_group_sizes = dict(reversed(list(tensor_model_parallel_group_sizes.items())))
+    
+    reversed_all_gpu_ranks = dict(reversed(list(all_gpu_ranks.items())))
+    reversed_all_data_parallel_group_ranks = dict(reversed(all_data_parallel_group_ranks.items()))
+    for k in reversed_all_gpu_ranks:
+        reversed_all_gpu_ranks[k] = list(reversed(list(reversed_all_gpu_ranks[k])))
+        reversed_all_data_parallel_group_ranks[k] = list(reversed(reversed_all_data_parallel_group_ranks[k]))
+        for i, _ in enumerate(reversed_all_data_parallel_group_ranks[k]):
+            reversed_all_data_parallel_group_ranks[k][i] = list(reversed(reversed_all_data_parallel_group_ranks[k][i]))
+
+    # iterate through each pipeline component parallel group
+    for i, k in enumerate(reversed_all_num_pipeline_components_parallel_groups):
         
-    _MAPPINGS = mappings
+        # iterate through each rank
+        for gpu_rank in reversed_all_gpu_ranks[k]:
+            bkwd_mappings[str(gpu_rank)] = []
+            # gpu_rank mapping is within component
+            if (gpu_rank - all_num_pipeline_components_parallel_groups[k]) in all_gpu_ranks[k]:
+                bkwd_mappings[str(gpu_rank)].append((gpu_rank - all_num_pipeline_components_parallel_groups[k], get_ranks_micro_batch_size(gpu_rank)))
+            # gpu_rank mappin is in the next component
+            else:
+                # find the index within the respective data parallel group
+                data_parallel_group_index = None
+                for data_parallel_group_ranks in reversed_all_data_parallel_group_ranks[k]:
+                    if gpu_rank in data_parallel_group_ranks:
+                        data_parallel_group_index = data_parallel_group_ranks.index(gpu_rank)
+                
+                assert data_parallel_group_index is not None
+                tensor_parallel_group_index = (reversed_tensor_model_parallel_group_sizes[k]-1) - (gpu_rank) % reversed_tensor_model_parallel_group_sizes[k]
+
+                if k != first_component_name:
+                    # step 1 (define the bucket)
+                    ratio = reversed_list_all_num_pipeline_components_parallel_groups[i+1] / reversed_list_all_num_pipeline_components_parallel_groups[i]
+                    start = ((data_parallel_group_index)) * ratio
+                    end = ((data_parallel_group_index+1)) * ratio
+
+                    # step 2 (redefine bucket)
+                    floor_start = int(math.floor((data_parallel_group_index) * ratio))
+                    ceil_end = int(math.ceil(((data_parallel_group_index+1)) * ratio))
+                    
+                    # steps 3 (define compoennt groups within redefined bucket)
+                    new_nodes = []
+                    for node in range(floor_start, ceil_end):
+                        destination = list(reversed_all_data_parallel_group_ranks.values())[i+1][tensor_parallel_group_index][node]
+                        partial_micro_batch_size = None
+                        for path in fwd_mappings[str(destination)]:
+                            if gpu_rank == path[0]:
+                                partial_micro_batch_size = path[1]
+                        assert partial_micro_batch_size != None
+                        new_node = [
+                            destination,
+                            partial_micro_batch_size
+                        ]
+                        new_nodes.append(new_node.copy())
+                        
+                    # add new nodes to fwd_mapping
+                    for new_node in new_nodes:
+                        bkwd_mappings[str(gpu_rank)].append(new_node)
+
+    _BKWD_MAPPINGS = bkwd_mappings
     # dfs to create pipeline model and component paralel ranks
     visited_paths = {}
+
+    # dictionaries to track initialized embedding and position embedding ranks
+    existing_embedding_ranks = {}
+    existing_position_embedding_ranks = {}
 
     list_connector_ranks = {}
 
     def pipeline_parallelism_setup(curr_rank):
         
         # check if dfs have reached end of pipeline_model_parallel_group
-        if not len(mappings[str(curr_rank)]):
+        if len(fwd_mappings[str(curr_rank)]) == 0:
             # initialize pipeline_model_parallel_group_here
-            group = torch.distributed.new_group(pipeline_model_parallel_ranks)
+            group = torch.distributed.new_group(pipeline_model_parallel_ranks.copy())
             if rank in pipeline_model_parallel_ranks:
                 _PIPELINE_MODEL_PARALLEL_GROUP.append(group)
                 _PIPELINE_GLOBAL_RANKS.append(pipeline_model_parallel_ranks.copy())
@@ -568,90 +656,112 @@ def initialize_model_components_parallel(
                 _LAST_PIPELINE_MODEL_PARALLEL_RANK = pipeline_model_parallel_ranks[-1]
 
                 if rank != pipeline_model_parallel_ranks[0]:
-                    _PREV_PIPELINE_MODEL_PARALLEL_RANK = pipeline_model_parallel_ranks[pipeline_model_parallel_ranks.index(rank) - 1]
+                    _PREV_PIPELINE_MODEL_PARALLEL_RANK.append(pipeline_model_parallel_ranks[pipeline_model_parallel_ranks.index(rank) - 1])
                 if rank != pipeline_model_parallel_ranks[-1]:
-                    _NEXT_PIPELINE_MODEL_PARALLEL_RANK = pipeline_model_parallel_ranks[pipeline_model_parallel_ranks.index(rank) + 1]
+                    _NEXT_PIPELINE_MODEL_PARALLEL_RANK.append(pipeline_model_parallel_ranks[pipeline_model_parallel_ranks.index(rank) + 1])
+                    # Setup embedding group (to exchange gradients between
 
-                # define previous and next component pipeline connector groups by iterating through ranks of full pipeline_model_paralell_group
-                for model_pipeline_index, pipeline_model_parallel_rank in enumerate(pipeline_model_parallel_ranks):
-                    if model_pipeline_index != (len(pipeline_model_parallel_ranks)-1):
-                        connector_ranks = [pipeline_model_parallel_rank, pipeline_model_parallel_ranks[model_pipeline_index+1]]
-                        if str(connector_ranks) not in list_connector_ranks:
-                            list_connector_ranks[str(connector_ranks)] = ''
-                            connector_group = torch.distributed.new_group(connector_ranks)
+            # first and last stages).
+            if len(pipeline_model_parallel_ranks) > 1:
+                embedding_ranks = [pipeline_model_parallel_ranks[0], pipeline_model_parallel_ranks[-1]]
+                position_embedding_ranks = [pipeline_model_parallel_ranks[0]]
+                if pipeline_model_parallel_split_rank is not None:
+                    if pipeline_model_parallel_ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
+                        embedding_ranks = [pipeline_model_parallel_ranks[0],
+                                        pipeline_model_parallel_ranks[pipeline_model_parallel_split_rank],
+                                        pipeline_model_parallel_ranks[-1]]
+                    if pipeline_model_parallel_ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
+                        position_embedding_ranks = [pipeline_model_parallel_ranks[0],
+                                        pipeline_model_parallel_ranks[pipeline_model_parallel_split_rank]]
+            else:
+                embedding_ranks = pipeline_model_parallel_ranks
+                position_embedding_ranks = pipeline_model_parallel_ranks
 
-                            # check if rank is in connector_group
-                            if rank == connector_ranks[0]:
-                                _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS.append(connector_ranks)
-                                _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS.append(connector_ranks)
+            if str(embedding_ranks) not in existing_embedding_ranks:
+                existing_embedding_ranks[str(embedding_ranks)] = ''
+                group = torch.distributed.new_group(embedding_ranks)
+                if rank in embedding_ranks:
+                    _EMBEDDING_GROUP.append(group)
+                if rank in pipeline_model_parallel_ranks:
+                    _EMBEDDING_GLOBAL_RANKS.append(embedding_ranks)
 
-                            if rank == connector_ranks[1]:
-                                _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS.append(connector_ranks)
-                                _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS.append(connector_ranks)
-        
+            if str(position_embedding_ranks) not in existing_position_embedding_ranks:
+                existing_position_embedding_ranks[str(position_embedding_ranks)] = ''
+                group = torch.distributed.new_group(position_embedding_ranks)
+                if rank in position_embedding_ranks:
+                    _POSITION_EMBEDDING_GROUP.append(group)
+                if rank in pipeline_model_parallel_ranks:
+                    _POSITION_EMBEDDING_GLOBAL_RANKS.append(position_embedding_ranks)
+
         # add current path to visited_paths
         visited_paths[str(list(pipeline_model_parallel_ranks))] = ''
-        # visit all possible mappings in a depth-first search manner if not already visited
-        for next_rank, _ in mappings[str(curr_rank)]:
+        # visit all possible fwd_mappings in a depth-first search manner if not already visited
+        for next_rank, _ in fwd_mappings[str(curr_rank)]:
+            if next_rank not in model_parallel_group:
+                model_parallel_group.append(next_rank)
             pipeline_model_parallel_ranks.append(next_rank)
             if str(list(pipeline_model_parallel_ranks)) not in visited_paths:
                 pipeline_parallelism_setup(next_rank)
             pipeline_model_parallel_ranks.pop()
 
+
+    # Build the pipeline model-parallel, component-parallel groups,
+    # model-parallel groups, and embedding groups
+    # (first and last rank in each pipeline model-parallel group).
+    global _PIPELINE_MODEL_PARALLEL_GROUP
+    global _PIPELINE_GLOBAL_RANKS
+    global _FIRST_PIPELINE_MODEL_PARALLEL_RANK
+    global _LAST_PIPELINE_MODEL_PARALLEL_RANK
+    global _PREV_PIPELINE_MODEL_PARALLEL_RANK
+    global _NEXT_PIPELINE_MODEL_PARALLEL_RANK
+
+    assert not len(_PIPELINE_MODEL_PARALLEL_GROUP), \
+        'pipeline model parallel group is already initialized'
+
+    global _MODEL_PARALLEL_GROUP
+    assert len(_MODEL_PARALLEL_GROUP) == 0, 'model parallel group is already initialized'
     
-    # iterate through all starting ranks
-    start_rank = 0
-    num_visited_paths_before = 0
-    num_visited_paths_after = -1
-    while start_rank < (data_parallel_group_sizes[first_component_name] * tensor_model_parallel_group_sizes[first_component_name]):
-        pipeline_model_parallel_ranks = [start_rank]
-        num_visited_paths_before = len(visited_paths)
-        pipeline_parallelism_setup(start_rank)
-        num_visited_paths_after = len(visited_paths)
-        start_rank += 1
-
-    # Build the embedding groups (first and last rank in each pipeline model-parallel group).
-    # The embedding groups are defined based on the entire model, not individual components
-
     global _EMBEDDING_GROUP
     global _EMBEDDING_GLOBAL_RANKS
-    assert _EMBEDDING_GROUP is None, 'embedding group is already initialized'
+    assert len(_EMBEDDING_GROUP) == 0, 'embedding group is already initialized'
     global _POSITION_EMBEDDING_GROUP
     global _POSITION_EMBEDDING_GLOBAL_RANKS
-    assert _POSITION_EMBEDDING_GROUP is None, \
+    assert len(_POSITION_EMBEDDING_GROUP) == 0, \
         'position embedding group is already initialized'
-    for i in range(all_num_pipeline_components_parallel_groups[first_component_name]):
-        ranks = range(all_gpu_ranks[first_component_name][i],
-                      all_gpu_ranks[last_component_name][world_sizes[last_component_name]-1]+1,
-                      all_num_pipeline_components_parallel_groups[first_component_name])
-        # Setup embedding group (to exchange gradients between
-        # first and last stages).
-        if len(ranks) > 1:
-            embedding_ranks = [ranks[0], ranks[-1]]
-            position_embedding_ranks = [ranks[0]]
-            if pipeline_model_parallel_split_rank is not None:
-                if ranks[pipeline_model_parallel_split_rank] not in embedding_ranks:
-                    embedding_ranks = [ranks[0],
-                                       ranks[pipeline_model_parallel_split_rank],
-                                       ranks[-1]]
-                if ranks[pipeline_model_parallel_split_rank] not in position_embedding_ranks:
-                    position_embedding_ranks = [ranks[0],
-                                       ranks[pipeline_model_parallel_split_rank]]
+    # iterate through all starting ranks, define pipeline_model_parallel_groups and model_parallel_groups
+    start_rank = 0
+    model_parallel_group = []
+    while start_rank < (data_parallel_group_sizes[first_component_name] * tensor_model_parallel_group_sizes[first_component_name]):
+        # need to fix for v2, this asusmes that tensor_model_parallel_group_sizes is uniform across components
+        if start_rank > 0 and start_rank % tensor_model_parallel_group_sizes[first_component_name] == 0:
+            model_parallel_group.sort()
+            group = torch.distributed.new_group(model_parallel_group)
+            if rank in model_parallel_group:
+                _MODEL_PARALLEL_GROUP.append(group)
+            model_parallel_group = [start_rank]
         else:
-            embedding_ranks = ranks
-            position_embedding_ranks = ranks
+            model_parallel_group.append(start_rank)
+        pipeline_model_parallel_ranks = [start_rank]
+        pipeline_parallelism_setup(start_rank)
+        start_rank += 1
 
-        group = torch.distributed.new_group(embedding_ranks)
-        if rank in embedding_ranks:
-            _EMBEDDING_GROUP = group
-        if rank in ranks:
-            _EMBEDDING_GLOBAL_RANKS = embedding_ranks
+    model_parallel_group.sort()
+    group = torch.distributed.new_group(model_parallel_group)
+    if rank in model_parallel_group:
+        _MODEL_PARALLEL_GROUP.append(group)
 
-        group = torch.distributed.new_group(position_embedding_ranks)
-        if rank in position_embedding_ranks:
-            _POSITION_EMBEDDING_GROUP = group
-        if rank in ranks:
-            _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
+
+    # define pipeline component parallel ranks (no need to initialize)
+    global _PIPELINE_COMPONENT_GLOBAL_RANKS
+    assert _PIPELINE_COMPONENT_GLOBAL_RANKS is None
+    
+    # components will always be the same, regardless of the number of different pipeline model parallel groups for a specific rank
+    _PIPELINE_COMPONENT_GLOBAL_RANKS = []
+    for component_rank in get_pipeline_model_parallel_groups_ranks()[0]:
+        for k in parallelization_specs:
+            if rank in all_gpu_ranks[k] and component_rank in all_gpu_ranks[k]:
+                _PIPELINE_COMPONENT_GLOBAL_RANKS.append(component_rank)
+
 
     # Build the FP8 groups.
     global _AMAX_REDUCTION_GROUP
@@ -698,7 +808,14 @@ def get_using_layer_unit_test_strategy():
 
 def get_model_parallel_group():
     """Get the model parallel group the caller rank belongs to."""
-    assert _MODEL_PARALLEL_GROUP is not None, \
+    assert len(_MODEL_PARALLEL_GROUP) != 0, \
+        'model parallel group is not initialized'
+    return _MODEL_PARALLEL_GROUP[0]
+
+
+def get_model_parallel_groups():
+    """Get the model parallel group the caller rank belongs to."""
+    assert len(_MODEL_PARALLEL_GROUP) != 0, \
         'model parallel group is not initialized'
     return _MODEL_PARALLEL_GROUP
 
@@ -723,23 +840,6 @@ def get_pipeline_model_parallel_groups():
     return _PIPELINE_MODEL_PARALLEL_GROUP
 
 
-def get_pipeline_component_parallel_groups(direction: Optional[str] = ''):
-    """Get the pipeline component parallel group the caller rank belongs to."""
-    """If direction is specific, get the next/prev component parallel connector group"""
-    """Will return a list of pipeline component parallel groups"""
-    if direction != '':
-        assert direction in ['next', 'prev']
-        if direction == 'next':
-            assert not is_pipeline_last_stage()
-            assert len(_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS)
-            return _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS
-        if direction == 'prev':
-            assert not is_pipeline_first_stage()
-            assert len(_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS)
-            return _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS
-    raise RuntimeError('get_pipeline_component_parallel_groups_ranks needs direction')
-
-
 def get_pipeline_component_parallel_groups_ranks(direction: Optional[str] = ''):
     """Get the pipeline component parallel group the caller rank belongs to."""
     """If direction is specific, get the next/prev component parallel connector group"""
@@ -748,12 +848,18 @@ def get_pipeline_component_parallel_groups_ranks(direction: Optional[str] = ''):
         assert direction in ['next', 'prev']
         if direction == 'next':
             assert not is_pipeline_last_stage()
-            assert len(_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS)
-            return _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS
+            return get_pipeline_model_parallel_next_ranks()
         if direction == 'prev':
             assert not is_pipeline_first_stage()
-            assert len(_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS)
-            return _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS
+            return get_pipeline_model_parallel_prev_ranks()
+    assert len(_PIPELINE_COMPONENT_GLOBAL_RANKS) != 0, \
+        'pipeline_model parallel group is not defined'
+    return _PIPELINE_COMPONENT_GLOBAL_RANKS
+
+
+def get_pipeline_model_parallel_groups_ranks():
+    assert len(_PIPELINE_GLOBAL_RANKS) > 0
+    return _PIPELINE_GLOBAL_RANKS
 
 
 def get_data_parallel_group():
@@ -772,14 +878,28 @@ def get_data_parallel_group_gloo():
 
 def get_embedding_group():
     """Get the embedding group the caller rank belongs to."""
-    assert _EMBEDDING_GROUP is not None, \
+    assert len(_EMBEDDING_GROUP) != 0, \
+        'embedding group is not initialized'
+    return _EMBEDDING_GROUP[0]
+
+
+def get_embedding_groups():
+    """Get the embedding group the caller rank belongs to."""
+    assert len(_EMBEDDING_GROUP) != 0, \
         'embedding group is not initialized'
     return _EMBEDDING_GROUP
 
 
 def get_position_embedding_group():
     """Get the position embedding group the caller rank belongs to."""
-    assert _POSITION_EMBEDDING_GROUP is not None, \
+    assert len(_POSITION_EMBEDDING_GROUP) != 0, \
+        'position embedding group is not initialized'
+    return _POSITION_EMBEDDING_GROUP[0]
+
+
+def get_position_embedding_groups():
+    """Get the position embedding group the caller rank belongs to."""
+    assert len(_POSITION_EMBEDDING_GROUP) != 0, \
         'position embedding group is not initialized'
     return _POSITION_EMBEDDING_GROUP
 
@@ -836,7 +956,8 @@ def get_pipeline_component_parallel_world_size():
     global _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
     if _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE is not None:
         return _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
-    return torch.distributed.get_world_size(group=get_pipeline_component_parallel_group())
+    assert len(_PIPELINE_COMPONENT_GLOBAL_RANKS) != 0
+    return len(_PIPELINE_COMPONENT_GLOBAL_RANKS)
 
 
 def set_tensor_model_parallel_rank(rank):
@@ -888,7 +1009,8 @@ def get_pipeline_component_parallel_rank():
         return _MPU_PIPELINE_COMPONENT_PARALLEL_RANK
     # all pipieline component parallel groups are the same size and
     # have rank at the same index, so we can just use the first group
-    return torch.distributed.get_rank(group=get_pipeline_component_parallel_group()[0])
+    rank = rank = torch.distributed.get_rank()
+    return _PIPELINE_COMPONENT_GLOBAL_RANKS.index(rank)
 
 
 def get_pipeline_model_parallel_split_rank():
@@ -936,12 +1058,13 @@ def is_rank_in_embedding_group(ignore_virtual=False):
     """Return true if current rank is in embedding group, False otherwise."""
     rank = torch.distributed.get_rank()
     global _EMBEDDING_GLOBAL_RANKS
+    assert len(_EMBEDDING_GLOBAL_RANKS) == 1
     if ignore_virtual:
-        return rank in _EMBEDDING_GLOBAL_RANKS
-    if rank in _EMBEDDING_GLOBAL_RANKS:
-        if rank == _EMBEDDING_GLOBAL_RANKS[0]:
+        return rank in _EMBEDDING_GLOBAL_RANKS[0]
+    if rank in _EMBEDDING_GLOBAL_RANKS[0]:
+        if rank == _EMBEDDING_GLOBAL_RANKS[0][0]:
             return is_pipeline_first_stage(ignore_virtual=False)
-        elif rank == _EMBEDDING_GLOBAL_RANKS[-1]:
+        elif rank == _EMBEDDING_GLOBAL_RANKS[0][-1]:
             return is_pipeline_last_stage(ignore_virtual=False)
         else:
             return True
@@ -952,7 +1075,8 @@ def is_rank_in_position_embedding_group():
     """Return true if current rank is in position embedding group, False otherwise."""
     rank = torch.distributed.get_rank()
     global _POSITION_EMBEDDING_GLOBAL_RANKS
-    return rank in _POSITION_EMBEDDING_GLOBAL_RANKS
+    assert len(_POSITION_EMBEDDING_GLOBAL_RANKS) == 1
+    return rank in _POSITION_EMBEDDING_GLOBAL_RANKS[0]
 
 
 def is_pipeline_stage_before_split(rank=None):
@@ -1045,7 +1169,7 @@ def get_data_parallel_src_rank():
         "Data parallel group is not initialized"
     return _DATA_PARALLEL_GLOBAL_RANKS[0]
 
-
+# calls to this need adjustment for LUTS
 def get_pipeline_model_parallel_first_rank():
     """Return the global rank of the first process in the pipeline for the
     current tensor parallel group"""
@@ -1058,7 +1182,7 @@ def get_pipeline_model_parallel_first_rank():
             "Pipeline parallel group is not initialized"
         return _PIPELINE_GLOBAL_RANKS[0][0]
 
-
+# calls to this need adjustment for LUTS
 def get_pipeline_model_parallel_last_rank():
     """Return the global rank of the last process in the pipeline for the
     current tensor parallel group"""
@@ -1072,14 +1196,12 @@ def get_pipeline_model_parallel_last_rank():
         last_rank_local = get_pipeline_model_parallel_world_size() - 1
         return _PIPELINE_GLOBAL_RANKS[0][last_rank_local]
 
-
-def get_pipeline_model_parallel_next_rank():
+# calls to this need adjustment for LUTS
+def get_pipeline_model_parallel_next_ranks():
     """Return the global rank that follows the caller in the pipeline"""
     if get_using_layer_unit_test_strategy():
         assert len(_NEXT_PIPELINE_MODEL_PARALLEL_RANK) != 0, \
-            "Next pipeline parallel model rank is not initialized"
-        assert _NEXT_PIPELINE_MODEL_PARALLEL_RANK != -1, \
-            "Current rank does not have a a next pipeline model parallel rank"
+            "Previous pipeline parallel group is not initialized"
         return _NEXT_PIPELINE_MODEL_PARALLEL_RANK
     else:
         assert len(_PIPELINE_GLOBAL_RANKS) == 1, \
@@ -1088,14 +1210,12 @@ def get_pipeline_model_parallel_next_rank():
         world_size = get_pipeline_model_parallel_world_size()
         return _PIPELINE_GLOBAL_RANKS[0][(rank_in_pipeline + 1) % world_size]
 
-
-def get_pipeline_model_parallel_prev_rank():
+# calls to this need adjustment for LUTS
+def get_pipeline_model_parallel_prev_ranks():
     """Return the global rank that preceeds the caller in the pipeline"""
     if get_using_layer_unit_test_strategy():
-        assert _PREV_PIPELINE_MODEL_PARALLEL_RANK is not None, \
+        assert len(_PREV_PIPELINE_MODEL_PARALLEL_RANK) != 0, \
             "Previous pipeline parallel group is not initialized"
-        assert _PREV_PIPELINE_MODEL_PARALLEL_RANK != -1, \
-            "Current rank does not have a a previous pipeline model parallel rank"
         return _PREV_PIPELINE_MODEL_PARALLEL_RANK
     else:
         assert len(_PIPELINE_GLOBAL_RANKS) == 1, \
@@ -1115,15 +1235,38 @@ def get_data_parallel_rank():
     return torch.distributed.get_rank(group=get_data_parallel_group())
 
 
-def get_full_mappings():
-    """Return full mappings"""
-    return _MAPPINGS
+def get_full_mapping(direction: str):
+    """Return either full forward or backward mappings based on function input"""
+    if direction == "fwd":
+        assert len(_FWD_MAPPINGS) != 0
+        return _FWD_MAPPINGS
+    elif direction == "bkwd":
+        assert len(_BKWD_MAPPINGS) != 0
+        return _BKWD_MAPPINGS
+    raise ValueError("direction must be either `bkwd` or `fwd`")
+    
+
+def get_rank_mapping(direction: str):
+    """Return ranks that current rank maps to, dependent on function input"""
+    rank = torch.distributed.get_rank()
+    if direction == "fwd":
+        assert len(_FWD_MAPPINGS) != 0
+        return _FWD_MAPPINGS[str(rank)]
+    elif direction == "bkwd":
+        assert len(_BKWD_MAPPINGS) != 0
+        return _BKWD_MAPPINGS[str(rank)]
+    raise ValueError("direction must be either `bkwd` or `fwd`")
 
 
-def get_mapping():
-    """Return mapping for current rank"""
-    # global_rank = torch.distributed.get_rank()
-    return _MAPPINGS[str(rank)]
+def set_ranks_micro_batch_size(rank: int, micro_batch_size: int):
+    if rank not in _ALL_RANKS_MICRO_BATCH_SIZES:
+        _ALL_RANKS_MICRO_BATCH_SIZES[rank] = micro_batch_size
+    else:
+        _ALL_RANKS_MICRO_BATCH_SIZES[rank] += micro_batch_size
+
+
+def get_ranks_micro_batch_size(rank: int):
+    return _ALL_RANKS_MICRO_BATCH_SIZES[rank]
 
 
 def _set_global_memory_buffer():
@@ -1142,7 +1285,7 @@ def get_global_memory_buffer():
 def destroy_model_parallel():
     """Set the groups to none."""
     global _MODEL_PARALLEL_GROUP
-    _MODEL_PARALLEL_GROUP = None
+    _MODEL_PARALLEL_GROUP = []
     global _TENSOR_MODEL_PARALLEL_GROUP
     _TENSOR_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_MODEL_PARALLEL_GROUP
@@ -1150,19 +1293,15 @@ def destroy_model_parallel():
     global _DATA_PARALLEL_GROUP
     _DATA_PARALLEL_GROUP = None
     global _EMBEDDING_GROUP
-    _EMBEDDING_GROUP = None
+    _EMBEDDING_GROUP = []
     global _POSITION_EMBEDDING_GROUP
-    _POSITION_EMBEDDING_GROUP = None
+    _POSITION_EMBEDDING_GROUP = []
+    global _EMBEDDING_GLOBAL_RANKS
+    _EMBEDDING_GLOBAL_RANKS = []
+    global _POSITION_EMBEDDING_GLOBAL_RANKS
+    _POSITION_EMBEDDING_GLOBAL_RANKS = []
     global _AMAX_REDUCTION_GROUP
     _AMAX_REDUCTION_GROUP = None
-    global _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS
-    _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
-    global _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS
-    _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
-    global _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS
-    _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS = []
-    global _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS
-    _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS = []
     global _PREV_PIPELINE_MODEL_PARALLEL_RANK
     _PREV_PIPELINE_MODEL_PARALLEL_RANK = []
     global _NEXT_PIPELINE_MODEL_PARALLEL_RANK
@@ -1193,5 +1332,13 @@ def destroy_model_parallel():
     _NUM_COMPONENT_LAYERS = None
     global _USING_LAYER_UNIT_TEST_STRATEGY
     _USING_LAYER_UNIT_TEST_STRATEGY = None
-    global _MAPPINGS
-    _MAPPINGS = {}
+    global _PIPELINE_GLOBAL_RANKS
+    _PIPELINE_GLOBAL_RANKS = []
+    global _PIPELINE_COMPONENT_GLOBAL_RANKS
+    _PIPELINE_COMPONENT_GLOBAL_RANKS = None
+    global _FWD_MAPPINGS
+    _FWD_MAPPINGS = {}
+    global _BKWD_MAPPINGS
+    _BKWD_MAPPINGS = {}
+    global _ALL_RANKS_MICRO_BATCH_SIZES
+    _ALL_RANKS_MICRO_BATCH_SIZES = {}
