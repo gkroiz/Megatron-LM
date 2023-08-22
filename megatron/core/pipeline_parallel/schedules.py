@@ -129,10 +129,17 @@ def get_forward_backward_func():
     """
     pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
     if pipeline_model_parallel_size > 1:
-        if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
-            forward_backward_func = forward_backward_pipelining_with_interleaving
+        if parallel_state.get_using_layer_unit_test_strategy():
+            # TODO (gersonkroiz): add support for interleaving supported for some out of all components
+            if parallel_state.get_virtual_pipeline_component_parallel_world_size() is not None:
+                forward_backward_func = forward_backward_pipelining_with_interleaving
+            else:
+                forward_backward_func = forward_backward_pipelining_without_interleaving
         else:
-            forward_backward_func = forward_backward_pipelining_without_interleaving
+            if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
+                forward_backward_func = forward_backward_pipelining_with_interleaving
+            else:
+                forward_backward_func = forward_backward_pipelining_without_interleaving
     else:
         forward_backward_func = forward_backward_no_pipelining
     return forward_backward_func
@@ -478,12 +485,18 @@ def forward_backward_pipelining_with_interleaving(*,
     if not forward_only:
         output_tensor_grads = [[] for _ in range(len(model))]
 
-    pipeline_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
-    pipeline_parallel_rank = parallel_state.get_pipeline_model_parallel_rank()
-
-    if num_microbatches % pipeline_parallel_size != 0:
+    pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
+    pipeline_model_parallel_rank = parallel_state.get_pipeline_model_parallel_rank()
+    
+    pipeline_component_parallel_size, pipeline_component_rank = None, None
+    if parallel_state.get_using_layer_unit_test_strategy():
+        pipeline_component_parallel_size = parallel_state.get_pipeline_component_parallel_world_size()
+        pipeline_component_rank = parallel_state.get_pipeline_component_parallel_rank()
+    
+    # TODO (gersonkroiz): need to adjust for non-uniform data parallelism
+    if num_microbatches % pipeline_model_parallel_size != 0:
         msg = f'number of microbatches ({num_microbatches}) is not divisible by '
-        msg += f'pipeline-model-parallel-size ({pipeline_parallel_size}) '
+        msg += f'pipeline-model-parallel-size ({pipeline_model_parallel_size}) '
         msg += 'when using interleaved schedule'
         raise RuntimeError(msg)
 
@@ -494,6 +507,7 @@ def forward_backward_pipelining_with_interleaving(*,
     if decoder_seq_length is not None and decoder_seq_length != tensor_shape[0]:
         raise RuntimeError("Interleaving is not supported with a different decoder sequence length.")
 
+    # TODO (gersonkroiz): check this
     if sequence_parallel:
         seq_length, batch_size, hidden = tensor_shape
         tensor_shape = (
@@ -504,6 +518,7 @@ def forward_backward_pipelining_with_interleaving(*,
 
     # Compute number of warmup and remaining microbatches.
     num_model_chunks = len(model)
+    num_component_chunks = num_model_chunks
     total_num_microbatches = num_microbatches * num_model_chunks
     all_warmup_microbatches = False
     if forward_only:
@@ -511,18 +526,18 @@ def forward_backward_pipelining_with_interleaving(*,
     else:
         # Run all forward passes and then all backward passes if number of
         # microbatches is just the number of pipeline stages.
-        # Otherwise, perform (num_model_chunks-1)*pipeline_parallel_size on
+        # Otherwise, perform (num_model_chunks-1)*pipeline_model_parallel_size on
         # all workers, followed by more microbatches after depending on
         # stage ID (more forward passes for earlier stages, later stages can
         # immediately start with 1F1B).
-        if num_microbatches == pipeline_parallel_size:
+        if num_microbatches == pipeline_model_parallel_size:
             num_warmup_microbatches = total_num_microbatches
             all_warmup_microbatches = True
         else:
             num_warmup_microbatches = \
-                (pipeline_parallel_size - pipeline_parallel_rank - 1) * 2
+                (pipeline_model_parallel_size - pipeline_model_parallel_rank - 1) * 2
             num_warmup_microbatches += (
-                num_model_chunks - 1) * pipeline_parallel_size
+                num_model_chunks - 1) * pipeline_model_parallel_size
             num_warmup_microbatches = min(num_warmup_microbatches,
                                           total_num_microbatches)
     num_microbatches_remaining = \
@@ -535,31 +550,31 @@ def forward_backward_pipelining_with_interleaving(*,
 
     def get_model_chunk_id(microbatch_id, forward):
         """Helper method to get the model chunk ID given the iteration number."""
-        microbatch_id_in_group = microbatch_id % (pipeline_parallel_size * num_model_chunks)
-        model_chunk_id = microbatch_id_in_group // pipeline_parallel_size
+        microbatch_id_in_group = microbatch_id % (pipeline_model_parallel_size * num_model_chunks)
+        model_chunk_id = microbatch_id_in_group // pipeline_model_parallel_size
         if not forward:
             model_chunk_id = (num_model_chunks - model_chunk_id - 1)
         return model_chunk_id
 
     def is_first_microbatch_for_model_chunk(microbatch_id: int) -> bool:
         """Check if an iteration is the first for a model chunk."""
-        microbatch_group_size = pipeline_parallel_size * num_model_chunks
+        microbatch_group_size = pipeline_model_parallel_size * num_model_chunks
         num_microbatch_groups = total_num_microbatches // microbatch_group_size
         microbatch_group_id = microbatch_id // microbatch_group_size
         microbatch_id_in_group = microbatch_id % microbatch_group_size
         if microbatch_group_id == 0:
-            return microbatch_id_in_group % pipeline_parallel_size == 0
+            return microbatch_id_in_group % pipeline_model_parallel_size == 0
         else:
             return False
 
     def is_last_microbatch_for_model_chunk(microbatch_id: int) -> bool:
         """Check if an iteration is the last for a model chunk."""
-        microbatch_group_size = pipeline_parallel_size * num_model_chunks
+        microbatch_group_size = pipeline_model_parallel_size * num_model_chunks
         num_microbatch_groups = total_num_microbatches // microbatch_group_size
         microbatch_group_id = microbatch_id // microbatch_group_size
         microbatch_id_in_group = microbatch_id % microbatch_group_size
         if microbatch_group_id == num_microbatch_groups - 1:
-            return microbatch_id_in_group % pipeline_parallel_size == pipeline_parallel_size - 1
+            return microbatch_id_in_group % pipeline_model_parallel_size == pipeline_model_parallel_size - 1
         else:
             return False
 
@@ -577,7 +592,7 @@ def forward_backward_pipelining_with_interleaving(*,
         # asynchronous communication at the same time across the
         # pipeline-parallel group.
         if param_sync_func is not None:
-            param_sync_microbatch_id = microbatch_id + pipeline_parallel_rank
+            param_sync_microbatch_id = microbatch_id + pipeline_model_parallel_rank
             if param_sync_microbatch_id < num_microbatches and is_first_microbatch_for_model_chunk(param_sync_microbatch_id):
                 param_sync_chunk_id = get_model_chunk_id(param_sync_microbatch_id, forward=True) + 1
                 if 1 < param_sync_chunk_id < num_model_chunks:
@@ -641,7 +656,7 @@ def forward_backward_pipelining_with_interleaving(*,
         # asynchronous communication at the same time across the
         # pipeline-parallel group.
         if grad_sync_func is not None:
-            grad_sync_microbatch_id = microbatch_id - pipeline_parallel_rank
+            grad_sync_microbatch_id = microbatch_id - pipeline_model_parallel_rank
             if grad_sync_microbatch_id >= 0 and is_last_microbatch_for_model_chunk(grad_sync_microbatch_id):
                 grad_sync_chunk_id = get_model_chunk_id(grad_sync_microbatch_id, forward=False)
                 enable_grad_sync()
@@ -767,9 +782,9 @@ def forward_backward_pipelining_with_interleaving(*,
             # received tensors.
             recv_prev = True
             if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
-                # First stage is ahead of last stage by (pipeline_parallel_size - 1).
+                # First stage is ahead of last stage by (pipeline_model_parallel_size - 1).
                 next_forward_model_chunk_id = get_model_chunk_id(
-                    forward_k - (pipeline_parallel_size - 1), forward=True)
+                    forward_k - (pipeline_model_parallel_size - 1), forward=True)
                 if next_forward_model_chunk_id == (num_model_chunks - 1):
                     recv_prev = False
                 next_forward_model_chunk_id += 1
@@ -812,9 +827,9 @@ def forward_backward_pipelining_with_interleaving(*,
             # Determine if the current virtual stage has an activation gradient tensor to receive
             recv_next = True
             if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
-                # Last stage is ahead of first stage by (pipeline_parallel_size - 1).
+                # Last stage is ahead of first stage by (pipeline_model_parallel_size - 1).
                 next_backward_model_chunk_id = get_model_chunk_id(
-                    backward_k - (pipeline_parallel_size - 1), forward=False
+                    backward_k - (pipeline_model_parallel_size - 1), forward=False
                 )
                 if next_backward_model_chunk_id == 0:
                     recv_next = False
@@ -858,9 +873,9 @@ def forward_backward_pipelining_with_interleaving(*,
             # received tensors.
             recv_prev = True
             if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
-                # First stage is ahead of last stage by (pipeline_parallel_size - 1).
+                # First stage is ahead of last stage by (pipeline_model_parallel_size - 1).
                 next_forward_model_chunk_id = get_model_chunk_id(
-                    forward_k - (pipeline_parallel_size - 1), forward=True)
+                    forward_k - (pipeline_model_parallel_size - 1), forward=True)
                 if next_forward_model_chunk_id == (num_model_chunks - 1):
                     recv_prev = False
                 next_forward_model_chunk_id += 1
@@ -870,9 +885,9 @@ def forward_backward_pipelining_with_interleaving(*,
 
             recv_next = True
             if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
-                # Last stage is ahead of first stage by (pipeline_parallel_size - 1).
+                # Last stage is ahead of first stage by (pipeline_model_parallel_size - 1).
                 next_backward_model_chunk_id = get_model_chunk_id(
-                    backward_k - (pipeline_parallel_size - 1), forward=False)
+                    backward_k - (pipeline_model_parallel_size - 1), forward=False)
                 if next_backward_model_chunk_id == 0:
                     recv_next = False
                 next_backward_model_chunk_id -= 1
@@ -948,18 +963,20 @@ def forward_backward_pipelining_with_interleaving(*,
 
     return forward_data_store
 
+# TODO (gkroiz): update this for non-uniformness
 def get_tensor_shapes(*,
-                      rank: int,
+                      pipeline_rank: int,
+                      dist_rank: int,
                       model_type: ModelType,
                       tensor_shape: Shape,
                       decoder_seq_length: int,
                       sequence_parallel: bool):
-    # Determine right tensor sizes (based on position of rank with respect to split
-    # rank) and model size.
-    # Send two tensors if model is T5 and rank is in decoder stage:
+    # Determine right tensor sizes (based on position of pipeline_rank with respect to split
+    # pipeline_rank) and model size.
+    # Send two tensors if model is T5 and pipeline_rank is in decoder stage:
     #     first tensor is decoder (pre-transpose),
     #     second tensor is encoder (post-transpose).
-    # If model is T5 and rank is at the boundary:
+    # If model is T5 and pipeline_rank is at the boundary:
     #     send one tensor (post-transpose from encoder).
     # Otherwise, send one tensor (pre-transpose).
     tensor_shapes = []
@@ -968,7 +985,10 @@ def get_tensor_shapes(*,
         len(tensor_shape) == 3
     ), f"`tensor_shape` should be [sequence_length, micro_batch_size, hidden_size] but {tensor_shape}"
 
+    # micro_batch_size will be None when using LayerUnitTestStrategy and needs to be defined
     seq_length, micro_batch_size, hidden_size = tensor_shape
+    
+    micro_batch_size = parallel_state.get_ranks_micro_batch_size(dist_rank)
 
     if sequence_parallel:
         seq_length = seq_length // parallel_state.get_tensor_model_parallel_world_size()
@@ -977,7 +997,7 @@ def get_tensor_shapes(*,
         if sequence_parallel:
             decoder_seq_length = decoder_seq_length // parallel_state.get_tensor_model_parallel_world_size()
 
-        if parallel_state.is_pipeline_stage_before_split(rank):
+        if parallel_state.is_pipeline_stage_before_split(pipeline_rank):
             tensor_shapes.append((seq_length, micro_batch_size, hidden_size))
         else:
             tensor_shapes.append((decoder_seq_length, micro_batch_size, hidden_size))
@@ -1129,13 +1149,17 @@ def forward_backward_pipelining_without_interleaving(*,
 
     model_type = get_model_type(model)
 
-    rank = parallel_state.get_pipeline_model_parallel_rank()
-    recv_tensor_shapes = get_tensor_shapes(rank=rank-1,
+    pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
+    rank = torch.distributed.get_rank()
+
+    recv_tensor_shapes = get_tensor_shapes(pipeline_rank=pipeline_rank-1,
+                                           dist_rank=rank,
                                            model_type=model_type,
                                            tensor_shape=tensor_shape,
                                            decoder_seq_length=decoder_seq_length,
                                            sequence_parallel=sequence_parallel)
-    send_tensor_shapes = get_tensor_shapes(rank=rank,
+    send_tensor_shapes = get_tensor_shapes(pipeline_rank=pipeline_rank,
+                                           dist_rank=rank,
                                            model_type=model_type,
                                            tensor_shape=tensor_shape,
                                            decoder_seq_length=decoder_seq_length,
@@ -1150,7 +1174,6 @@ def forward_backward_pipelining_without_interleaving(*,
     forward_data_store = []
 
 
-    rank = torch.distributed.get_rank()
 
     # Run warmup forward passes.
     warmup_rng = nvtx.start_range(message="fwd_pass_warmup", color="green")
