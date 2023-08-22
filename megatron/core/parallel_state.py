@@ -35,6 +35,8 @@ _LAST_PIPELINE_MODEL_PARALLEL_RANK = []
 
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+_VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK = None
+_VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE = None
 _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = None
 
 # Mappings of all pipeline parallel groups with data_split_ratio
@@ -292,7 +294,6 @@ def initialize_model_parallel(
 def initialize_model_components_parallel(
     parallelization_specs: dict,
     micro_batch_size: int,
-    virtual_pipeline_model_parallel_size: Optional[int] = None,
     pipeline_model_parallel_split_rank: Optional[int] = None,
     use_fp8: bool = False,
 ) -> None:
@@ -320,6 +321,7 @@ def initialize_model_components_parallel(
 
     """
     assert torch.distributed.is_initialized()
+    rank = torch.distributed.get_rank()
 
     global _USING_LAYER_UNIT_TEST_STRATEGY
     _USING_LAYER_UNIT_TEST_STRATEGY = True
@@ -327,7 +329,8 @@ def initialize_model_components_parallel(
     world_sizes = {}
     tensor_model_parallel_group_sizes = {}
     data_parallel_group_sizes = {}
-    pipeline_model_parallel_group_sizes = {}
+    pipeline_component_parallel_group_sizes = {}
+    virtual_pipeline_component_parallel_group_sizes = {}
 
     all_num_tensor_model_parallel_groups = {}
     all_num_pipeline_components_parallel_groups = {}
@@ -340,35 +343,41 @@ def initialize_model_components_parallel(
         world_sizes[k] = len(parallelization_specs[k]["gpu_ranks"])
         tensor_model_parallel_group_sizes[k] = parallelization_specs[k]["tensor_model_parallel_group_size"]
         data_parallel_group_sizes[k] = parallelization_specs[k]["data_parallel_group_size"]
-        pipeline_model_parallel_group_sizes[k] = parallelization_specs[k]["pipeline_model_parallel_group_size"]
+        pipeline_component_parallel_group_sizes[k] = parallelization_specs[k]["pipeline_model_parallel_group_size"]
+        if "virtual_pipeline_model_parallel_size" in parallelization_specs[k]:
+            virtual_pipeline_component_parallel_group_sizes[k] = parallelization_specs[k]["virtual_pipeline_model_parallel_size"]
+        else:
+            virtual_pipeline_component_parallel_group_sizes[k] = None
         all_num_tensor_model_parallel_groups[k] = world_sizes[k] // tensor_model_parallel_group_sizes[k]
-        all_num_pipeline_components_parallel_groups[k] = world_sizes[k] // pipeline_model_parallel_group_sizes[k]
+        all_num_pipeline_components_parallel_groups[k] = world_sizes[k] // pipeline_component_parallel_group_sizes[k]
         all_num_data_parallel_groups[k] = world_sizes[k] // data_parallel_group_sizes[k]
 
         all_data_parallel_group_ranks[k] = []
         all_gpu_ranks[k] = parallelization_specs[k]['gpu_ranks']
 
     for k in parallelization_specs:
-        if world_sizes[k] % (tensor_model_parallel_group_sizes[k] * pipeline_model_parallel_group_sizes[k]) != 0:
+        if world_sizes[k] % (tensor_model_parallel_group_sizes[k] * pipeline_component_parallel_group_sizes[k]) != 0:
             raise RuntimeError(
                 f"component world_size ({world_sizes[k]}) is not divisible by tensor_model_parallel_size "
-                f"({tensor_model_parallel_group_sizes[k]}) x pipeline_model_parallel_size ({pipeline_model_parallel_group_sizes[k]})"
+                f"({tensor_model_parallel_group_sizes[k]}) x pipeline_model_parallel_size ({pipeline_component_parallel_group_sizes[k]})"
             )
 
-    if virtual_pipeline_model_parallel_size is not None:
-        if not pipeline_model_parallel_size > 2:
-            raise RuntimeError("pipeline-model-parallel size should be greater than 2 with "
-                               "interleaved schedule")
-        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
-        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
-        _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = 0
-        _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = virtual_pipeline_model_parallel_size
+    global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK
+    global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+    global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
+    global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+    for k in parallelization_specs:
+        if virtual_pipeline_component_parallel_group_sizes[k] is not None:
+            if not pipeline_component_parallel_group_sizes[k] > 2:
+                raise RuntimeError("pipeline-component-parallel size should be greater than 2 with "
+                                "interleaved schedule")
+            if rank in all_gpu_ranks[k]:
+                _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK = 0
+                _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE = virtual_pipeline_component_parallel_group_sizes[k]
 
     if pipeline_model_parallel_split_rank is not None:
         global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
         _PIPELINE_MODEL_PARALLEL_SPLIT_RANK = pipeline_model_parallel_split_rank
-
-    rank = torch.distributed.get_rank()
 
     # Build the data-parallel groups.
     global _DATA_PARALLEL_GROUP
@@ -377,7 +386,7 @@ def initialize_model_components_parallel(
     assert _DATA_PARALLEL_GROUP is None, 'data parallel group is already initialized'
 
     for k in parallelization_specs:
-        for i in range(pipeline_model_parallel_group_sizes[k]):
+        for i in range(pipeline_component_parallel_group_sizes[k]):
             start_rank = i * all_num_pipeline_components_parallel_groups[k]
             end_rank = (i + 1) * all_num_pipeline_components_parallel_groups[k]
             for j in range(tensor_model_parallel_group_sizes[k]):
@@ -1119,27 +1128,51 @@ def is_pipeline_stage_at_split():
 
 
 def get_virtual_pipeline_model_parallel_rank():
-    """Return the virtual pipeline-parallel rank."""
+    """Return the virtual pipeline-parallel rank for full model."""
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
     return _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
 
 
 def set_virtual_pipeline_model_parallel_rank(rank):
-    """Set the virtual pipeline-parallel rank."""
+    """Set the virtual pipeline-parallel rank for full model."""
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = rank
 
 
 def get_virtual_pipeline_model_parallel_world_size():
-    """Return the virtual pipeline-parallel world size."""
+    """Return the virtual pipeline-parallel world size for full model."""
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     return _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
 
 
 def set_virtual_pipeline_model_parallel_world_size(world_size):
-    """Set the virtual pipeline-parallel world size"""
+    """Set the virtual pipeline-parallel world size for full model"""
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
+
+
+def get_virtual_pipeline_component_parallel_rank():
+    """Return the virtual pipeline-parallel rank for component."""
+    global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK
+    return _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK
+
+
+def set_virtual_pipeline_component_parallel_rank(rank):
+    """Set the virtual pipeline-parallel rank for component."""
+    global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK
+    _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK = rank
+
+
+def get_virtual_pipeline_component_parallel_world_size():
+    """Return the virtual pipeline-parallel world size for component."""
+    global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+    return _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+
+
+def set_virtual_pipeline_component_parallel_world_size(world_size):
+    """Set the virtual pipeline-parallel world size for component"""
+    global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+    _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE = world_size
 
 
 def get_num_component_layers():
@@ -1314,6 +1347,10 @@ def destroy_model_parallel():
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+    global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK
+    _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK = None
+    global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+    _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE = None
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
     _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
     global _MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
