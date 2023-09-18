@@ -78,6 +78,16 @@ _NUM_COMPONENT_LAYERS = None
 # whether layer unit test strategy is used (boolean)
 _USING_LAYER_UNIT_TEST_STRATEGY = None
 
+# whether interleaving is used (boolean)
+_USING_INTERLEAVING = None
+
+# booleans for whether current rank is in first or last component
+_IS_RANK_IN_FIRST_COMPONENT = False
+_IS_RANK_IN_LAST_COMPONENT = False
+
+# Dictionary to track pipeline parallel size for component based on key (rank)
+_PIPELINE_COMPONENT_PARALLEL_SIZES = {}
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -166,6 +176,9 @@ def initialize_model_parallel(
     num_pipeline_model_parallel_groups: int = world_size // pipeline_model_parallel_size
     num_data_parallel_groups: int = world_size // data_parallel_size
 
+    global _USING_INTERLEAVING
+    _USING_INTERLEAVING = False
+
     if virtual_pipeline_model_parallel_size is not None:
         if not pipeline_model_parallel_size > 2:
             raise RuntimeError("pipeline-model-parallel size should be greater than 2 with "
@@ -174,6 +187,7 @@ def initialize_model_parallel(
         global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
         _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = 0
         _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = virtual_pipeline_model_parallel_size
+        _USING_INTERLEAVING = True
 
     if pipeline_model_parallel_split_rank is not None:
         global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
@@ -362,10 +376,18 @@ def initialize_model_components_parallel(
                 f"({tensor_model_parallel_group_sizes[k]}) x pipeline_model_parallel_size ({pipeline_component_parallel_group_sizes[k]})"
             )
 
+    # define pipeline component parallel sizes for each rank's component
+    global _PIPELINE_COMPONENT_PARALLEL_SIZES
+    _PIPELINE_COMPONENT_PARALLEL_SIZES = pipeline_component_parallel_group_sizes
+
+    # define virtual global variables
     global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK
     global _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+    global _USING_INTERLEAVING
+    _USING_INTERLEAVING = False
+
     for k in parallelization_specs:
         if virtual_pipeline_component_parallel_group_sizes[k] is not None:
             if not pipeline_component_parallel_group_sizes[k] > 2:
@@ -374,6 +396,7 @@ def initialize_model_components_parallel(
             if rank in all_gpu_ranks[k]:
                 _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_RANK = 0
                 _VIRTUAL_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE = virtual_pipeline_component_parallel_group_sizes[k]
+                _USING_INTERLEAVING = True
 
     if pipeline_model_parallel_split_rank is not None:
         global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
@@ -403,6 +426,15 @@ def initialize_model_components_parallel(
     all_component_names = list(parallelization_specs.keys())
 
 
+    # Define boolean global vars for wihch component rank is in
+    global _IS_RANK_IN_FIRST_COMPONENT
+    global _IS_RANK_IN_LAST_COMPONENT
+    if rank in all_gpu_ranks[first_component_name]:
+        _IS_RANK_IN_FIRST_COMPONENT = True
+    if rank in all_gpu_ranks[last_component_name]:
+        _IS_RANK_IN_LAST_COMPONENT = True
+
+
     # Build the tensor model-parallel groups.
     global _TENSOR_MODEL_PARALLEL_GROUP
     assert _TENSOR_MODEL_PARALLEL_GROUP is None, \
@@ -427,25 +459,25 @@ def initialize_model_components_parallel(
     global _ALL_RANKS_MICRO_BATCH_SIZES
     assert len(_ALL_RANKS_MICRO_BATCH_SIZES) == 0
 
+    # set all micro_batch_sizes for first component
+    for gpu_rank in all_gpu_ranks[first_component_name]:
+        set_ranks_micro_batch_size(gpu_rank, micro_batch_size)
+
     # iterate through each pipeline component parallel group
     for i, k in enumerate(all_num_pipeline_components_parallel_groups):
         
         # iterate through each rank
         for gpu_rank in all_gpu_ranks[k]:
-            
-            # set micro_batch_size if first component
-            if k == first_component_name:
-                set_ranks_micro_batch_size(gpu_rank, micro_batch_size)
-
             fwd_mappings[str(gpu_rank)] = []
             next_gpu_rank = gpu_rank + all_num_pipeline_components_parallel_groups[k]
-            # gpu_rank mapping is within component
-            # define forward mapping from current rank to next rank and
-            # define the next rank's micro_batch_size
+            # when gpu_rank mapping is within component
+            # define forward mapping from current rank to next rank
             if next_gpu_rank in all_gpu_ranks[k]:
                 fwd_mappings[str(gpu_rank)].append((gpu_rank + all_num_pipeline_components_parallel_groups[k], get_ranks_micro_batch_size(gpu_rank)))
-                set_ranks_micro_batch_size(next_gpu_rank, get_ranks_micro_batch_size(gpu_rank))
-            # gpu_rank mapping is in the next component
+                # set micro_batch_size for next rank if it's not in the first component since those micro_batch_sizes are already defined
+                if gpu_rank not in all_gpu_ranks[first_component_name]:
+                    set_ranks_micro_batch_size(next_gpu_rank, get_ranks_micro_batch_size(gpu_rank))
+            # when gpu_rank mapping is in the next component
             else:
                 # find the index within the respective data parallel group
                 data_parallel_group_index = None
@@ -457,7 +489,7 @@ def initialize_model_components_parallel(
                 tensor_parallel_group_index = gpu_rank % tensor_model_parallel_group_sizes[k]
 
                     # ---------------------------------------------------------------------------------------------------
-                    # create component groups and define how data splits during fan-in/out
+                    # @gkroiz (EXPERIMENTAL) create component groups and define how data splits during fan-in/out
                     # ---------------------------------------------------------------------------------------------------
                     # walkthrough example:
                     #     first component has data parallel group size of 3, pipeline parallel group size of 1
@@ -516,7 +548,7 @@ def initialize_model_components_parallel(
                     floor_start = int(math.floor((data_parallel_group_index) * ratio))
                     ceil_end = int(math.ceil(((data_parallel_group_index+1)) * ratio))
 
-                    # steps 3 (define compoennt groups within redefined bucket)
+                    # steps 3 (define component groups within redefined bucket)
                     new_nodes = []
                     for node in range(floor_start, ceil_end):
 
@@ -566,9 +598,6 @@ def initialize_model_components_parallel(
                     for new_node in new_nodes:
                         set_ranks_micro_batch_size(new_node[0], new_node[1])
                         fwd_mappings[str(gpu_rank)].append(new_node)
-                else:
-                    if len(fwd_mappings[str(gpu_rank)]) == 0:
-                        set_ranks_micro_batch_size(gpu_rank, get_ranks_micro_batch_size(gpu_rank-all_num_tensor_model_parallel_groups[k]))
 
     _FWD_MAPPINGS = fwd_mappings
     assert len(_ALL_RANKS_MICRO_BATCH_SIZES) == sum(world_sizes.values()), \
@@ -815,6 +844,17 @@ def get_using_layer_unit_test_strategy():
     return _USING_LAYER_UNIT_TEST_STRATEGY
 
 
+def set_using_layer_unit_test_strategy(using_layer_unit_test_strategy):
+    global _USING_LAYER_UNIT_TEST_STRATEGY
+    _USING_LAYER_UNIT_TEST_STRATEGY = using_layer_unit_test_strategy
+
+
+def get_using_interleaving():
+    assert _USING_INTERLEAVING is not None, \
+        'parallel state not intialized'
+    return _USING_INTERLEAVING
+
+
 def get_model_parallel_group():
     """Get the model parallel group the caller rank belongs to."""
     assert len(_MODEL_PARALLEL_GROUP) != 0, \
@@ -960,13 +1000,18 @@ def get_pipeline_model_parallel_world_size():
     return torch.distributed.get_world_size(group=get_pipeline_model_parallel_group())
 
 
-def get_pipeline_component_parallel_world_size():
+def get_pipeline_component_parallel_world_size(component_name: str = None):
     """Return world size for the pipeline model parallel group."""
-    global _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
-    if _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE is not None:
-        return _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
-    assert len(_PIPELINE_COMPONENT_GLOBAL_RANKS) != 0
-    return len(_PIPELINE_COMPONENT_GLOBAL_RANKS)
+    if component_name is not None:
+        assert len(_PIPELINE_COMPONENT_PARALLEL_SIZES) != 0
+        assert component_name in ['stimulus', 'test', 'response']
+        return _PIPELINE_COMPONENT_PARALLEL_SIZES[component_name]
+    else:
+        global _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+        if _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE is not None:
+            return _MPU_PIPELINE_COMPONENT_PARALLEL_WORLD_SIZE
+        assert len(_PIPELINE_COMPONENT_GLOBAL_RANKS) != 0
+        return len(_PIPELINE_COMPONENT_GLOBAL_RANKS)
 
 
 def set_tensor_model_parallel_rank(rank):
@@ -1031,34 +1076,57 @@ def get_pipeline_model_parallel_split_rank():
 def is_pipeline_first_stage(ignore_virtual=False):
     """Return True if in the first pipeline model-parallel stage, False otherwise."""
     if not ignore_virtual:
-        if get_virtual_pipeline_model_parallel_world_size() is not None and \
-            get_virtual_pipeline_model_parallel_rank() != 0:
-            return False
+        if get_using_layer_unit_test_strategy():
+            return is_pipeline_component_first_stage() and is_pipeline_first_stage(True)
+        else:
+            if get_virtual_pipeline_model_parallel_world_size() is not None and \
+                get_virtual_pipeline_model_parallel_rank() != 0:
+                return False
     return get_pipeline_model_parallel_rank() == 0
 
 
-def is_pipeline_component_first_stage():
+def is_rank_in_first_component():
+    return _IS_RANK_IN_FIRST_COMPONENT
+
+
+def is_rank_in_last_component():
+    return _IS_RANK_IN_LAST_COMPONENT
+
+
+def is_pipeline_component_first_stage(ignore_virtual=False):
     """Return True if in the first pipeline component-parallel stage, False otherwise."""
-    # TODO: implement virtual conditional
+    if not ignore_virtual:
+        if get_virtual_pipeline_component_parallel_world_size() is not None and \
+            get_virtual_pipeline_component_parallel_rank() != 0:
+            return False
     return get_pipeline_component_parallel_rank() == 0
 
 
 def is_pipeline_last_stage(ignore_virtual=False):
     """Return True if in the last pipeline model-parallel stage, False otherwise."""
     if not ignore_virtual:
-        virtual_pipeline_model_parallel_world_size = \
-            get_virtual_pipeline_model_parallel_world_size()
-        if virtual_pipeline_model_parallel_world_size is not None and \
-            get_virtual_pipeline_model_parallel_rank() != (
-                virtual_pipeline_model_parallel_world_size - 1):
-            return False
+        if get_using_layer_unit_test_strategy():
+            return is_pipeline_component_last_stage() and is_pipeline_last_stage(True)
+        else:
+            virtual_pipeline_model_parallel_world_size = \
+                get_virtual_pipeline_model_parallel_world_size()
+            if virtual_pipeline_model_parallel_world_size is not None and \
+                get_virtual_pipeline_model_parallel_rank() != (
+                    virtual_pipeline_model_parallel_world_size - 1):
+                return False
     return get_pipeline_model_parallel_rank() == (
         get_pipeline_model_parallel_world_size() - 1)
 
 
-def is_pipeline_component_last_stage():
+def is_pipeline_component_last_stage(ignore_virtual=False):
     """Return True if in the last pipeline component-parallel stage, False otherwise."""
-    # TODO: implement virtual conditional
+    if not ignore_virtual:
+        virtual_pipeline_component_parallel_world_size = \
+            get_virtual_pipeline_component_parallel_world_size()
+        if virtual_pipeline_component_parallel_world_size is not None and \
+            get_virtual_pipeline_component_parallel_rank() != (
+                virtual_pipeline_component_parallel_world_size - 1):
+            return False
     return get_pipeline_component_parallel_rank() == (
         get_pipeline_component_parallel_world_size() - 1)
 
@@ -1257,6 +1325,26 @@ def get_pipeline_model_parallel_prev_ranks():
         world_size = get_pipeline_model_parallel_world_size()
         return _PIPELINE_GLOBAL_RANKS[0][(rank_in_pipeline - 1) % world_size]
 
+def get_pipeline_component_parallel_next_ranks():
+    """Return the global rank that follows the caller in the component's pipeline"""
+    assert get_using_layer_unit_test_strategy(), \
+        "This function can only be called when using LayerUnitTestStrategy()"
+    assert _PIPELINE_COMPONENT_GLOBAL_RANKS is not None, \
+        "Next pipeline parallel group is not initialized"
+    rank = torch.distributed.get_rank()
+    current_index = _PIPELINE_COMPONENT_GLOBAL_RANKS.index(rank)
+    return _PIPELINE_COMPONENT_GLOBAL_RANKS[(current_index + 1) % len(_PIPELINE_COMPONENT_GLOBAL_RANKS)]
+
+def get_pipeline_component_parallel_prev_ranks():
+    """Return the global rank that preceeds the caller in the component's pipeline"""
+    assert get_using_layer_unit_test_strategy(), \
+        "This function can only be called when using LayerUnitTestStrategy()"
+    assert _PIPELINE_COMPONENT_GLOBAL_RANKS is not None, \
+        "Previous pipeline parallel group is not initialized"
+    rank = torch.distributed.get_rank()
+    current_index = _PIPELINE_COMPONENT_GLOBAL_RANKS.index(rank)
+    return _PIPELINE_COMPONENT_GLOBAL_RANKS[current_index-1]
+
 
 def get_data_parallel_world_size():
     """Return world size for the data parallel group."""
@@ -1317,6 +1405,10 @@ def get_global_memory_buffer():
 
 def destroy_model_parallel():
     """Set the groups to none."""
+    global _IS_RANK_IN_FIRST_COMPONENT
+    _IS_RANK_IN_FIRST_COMPONENT = False
+    global _IS_RANK_IN_LAST_COMPONENT
+    _IS_RANK_IN_LAST_COMPONENT = False
     global _MODEL_PARALLEL_GROUP
     _MODEL_PARALLEL_GROUP = []
     global _TENSOR_MODEL_PARALLEL_GROUP
@@ -1369,6 +1461,8 @@ def destroy_model_parallel():
     _NUM_COMPONENT_LAYERS = None
     global _USING_LAYER_UNIT_TEST_STRATEGY
     _USING_LAYER_UNIT_TEST_STRATEGY = None
+    global _USING_INTERLEAVING
+    _USING_INTERLEAVING = None
     global _PIPELINE_GLOBAL_RANKS
     _PIPELINE_GLOBAL_RANKS = []
     global _PIPELINE_COMPONENT_GLOBAL_RANKS
@@ -1379,3 +1473,5 @@ def destroy_model_parallel():
     _BKWD_MAPPINGS = {}
     global _ALL_RANKS_MICRO_BATCH_SIZES
     _ALL_RANKS_MICRO_BATCH_SIZES = {}
+    global _PIPELINE_COMPONENT_PARALLEL_SIZES
+    _PIPELINE_COMPONENT_PARALLEL_SIZES = {}
