@@ -11,9 +11,13 @@ from megatron import core
 from megatron.core.parallel_state import (
     get_pipeline_model_parallel_group,
     get_pipeline_model_parallel_groups,
+    get_pipeline_model_parallel_rank,
     get_pipeline_model_parallel_prev_ranks,
     get_pipeline_model_parallel_next_ranks,
+    get_pipeline_component_parallel_prev_ranks,
+    get_pipeline_component_parallel_next_ranks,
     get_using_layer_unit_test_strategy,
+    get_using_interleaving,
     get_ranks_micro_batch_size
 )
 
@@ -116,27 +120,37 @@ def _batched_p2p_ops(*,
                      tensor_recv_prev: Optional[torch.Tensor],
                      tensor_send_next: Optional[torch.Tensor],
                      tensor_recv_next: Optional[torch.Tensor],
+                     within_component: bool = False,
                      group: torch.distributed.ProcessGroup):
     ops = []
+    rank = torch.distributed.get_rank()
     if tensor_send_prev is not None:
+        print(f'rank {rank} | tensor_send_prev: {tensor_send_prev}', flush=True)
+        print(f'rank {rank} | send_prev: {get_pipeline_model_parallel_prev_ranks()}', flush=True)
         send_prev_op = torch.distributed.P2POp(
             torch.distributed.isend, tensor_send_prev,
             get_pipeline_model_parallel_prev_ranks(),
             group)
         ops.append(send_prev_op)
     if tensor_recv_prev is not None:
+        print(f'rank {rank} | tensor_recv_prev: {tensor_recv_prev}', flush=True)
+        print(f'rank {rank} | recv_prev: {get_pipeline_model_parallel_prev_ranks()}', flush=True)
         recv_prev_op = torch.distributed.P2POp(
             torch.distributed.irecv, tensor_recv_prev,
             get_pipeline_model_parallel_prev_ranks(),
             group)
         ops.append(recv_prev_op)
     if tensor_send_next is not None:
+        print(f'rank {rank} | tensor_send_next: {tensor_send_next}', flush=True)
+        print(f'rank {rank} | send_next: {get_pipeline_model_parallel_next_ranks()}', flush=True)
         send_next_op = torch.distributed.P2POp(
             torch.distributed.isend, tensor_send_next,
             get_pipeline_model_parallel_next_ranks(),
             group)
         ops.append(send_next_op)
     if tensor_recv_next is not None:
+        print(f'rank {rank} | tensors_recv_next: {tensors_recv_next}', flush=True)
+        print(f'rank {rank} | recv_next: {get_pipeline_model_parallel_next_ranks()}', flush=True)
         recv_next_op = torch.distributed.P2POp(
             torch.distributed.irecv, tensor_recv_next,
             get_pipeline_model_parallel_next_ranks(),
@@ -153,9 +167,15 @@ def _batched_p2p_ops_w_components(*,
                      tensors_recv_prev: Optional[torch.Tensor],
                      tensor_send_next: Optional[torch.Tensor],
                      tensors_recv_next: Optional[torch.Tensor],
+                     within_component: bool = False,
                      groups: List[torch.distributed.ProcessGroup]):
+    rank = torch.distributed.get_rank()
+    print(f'rank {rank} | in _batched_p2p_ops_w_components()', flush=True)
     ops = []
     if tensor_send_prev is not None:
+        print(f'rank {rank} | tensor_send_prev is not None', flush=True)
+        prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
+        # print(f'rank {rank} | prev_ranks (1): {prev_ranks}', flush=True)
         num_groups = len(groups)
         # if fan-in, num_groups = 1
         if num_groups == 1:
@@ -163,25 +183,39 @@ def _batched_p2p_ops_w_components(*,
         # if fan-out, num_groups > 1
         elif num_groups > 1:
             split_sections = [
-                get_ranks_micro_batch_size(prev_node) for prev_node in get_pipeline_model_parallel_prev_ranks()[i]
+                get_ranks_micro_batch_size(prev_node) for prev_node in prev_ranks[i]
             ]
             split_tensors = torch.split(tensor_send_prev, split_sections, dim=1)
         else:
             raise ValueError("This error message should not appear, please file a bug.")
         for i, group in enumerate(groups):
+            # print(f'rank {rank} | tensor_send_prev[i]: {split_tensors[i]}', flush=True)
+            print(f'rank {rank} | size: {split_tensors[i].size()}', flush=True)
+            print(f'rank {rank} | prev_ranks[i]: {prev_ranks[i]}', flush=True)
             send_prev_op = torch.distributed.P2POp(
                 torch.distributed.isend, split_tensors[i],
-                get_pipeline_model_parallel_prev_ranks()[i],
+                prev_ranks[i],
                 group)
             ops.append(send_prev_op)
+            # torch.distributed.send(split_tensors[i], prev_ranks[i], group)
     if tensors_recv_prev is not None:
-        for i, _ in enumerate(groups):
+        print(f'rank {rank} | tensors_recv_prev is not None', flush=True)
+        prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
+        # print(f'rank {rank} | prev_ranks (2): {prev_ranks}', flush=True)
+        for i, group in enumerate(groups):
+            # print(f'rank {rank} | tensors_recv_prev[i]: {tensors_recv_prev[i]}', flush=True)
+            print(f'rank {rank} | size: {tensors_recv_prev[i].size()}', flush=True)
+            print(f'rank {rank} | prev_ranks[i]: {prev_ranks[i]}', flush=True)
             recv_prev_op = torch.distributed.P2POp(
                 torch.distributed.irecv, tensors_recv_prev[i],
-                get_pipeline_model_parallel_prev_ranks()[i],
-                groups[i])
+                prev_ranks[i],
+                group)
             ops.append(recv_prev_op)
+            # torch.distributed.recv(tensors_recv_prev[i], prev_ranks[i], group)
     if tensor_send_next is not None:
+        print(f'rank {rank} | tensor_send_next is not None', flush=True)
+        next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
+        # print(f'rank {rank} | next_ranks (1): {next_ranks}', flush=True)
         num_groups = len(groups)
         # if fan-in, num_groups = 1
         if num_groups == 1:
@@ -189,28 +223,43 @@ def _batched_p2p_ops_w_components(*,
         # if fan-out, num_groups > 1
         elif num_groups >= 1:
             split_sections = [
-                get_ranks_micro_batch_size(next_node) for next_node in get_pipeline_model_parallel_next_ranks()[i]
+                get_ranks_micro_batch_size(next_node) for next_node in next_ranks[i]
             ]
             split_tensors = torch.split(tensor_send_next, split_sections, dim=1)
         else:
             raise ValueError("This error message should not appear, please file a bug.")
         for i, group in enumerate(groups):
+            print(f'rank {rank} | tensor_send_next[i]: {split_tensors[i]}', flush=True)
+            print(f'rank {rank} | size: {split_tensors[i].size()}', flush=True)
+            print(f'rank {rank} | next_ranks[i]: {next_ranks[i]}', flush=True)
             send_next_op = torch.distributed.P2POp(
                 torch.distributed.isend, split_tensors[i],
-                get_pipeline_model_parallel_next_ranks()[i],
+                next_ranks[i],
                 group)
             ops.append(send_next_op)
+            # torch.distributed.send(split_tensors[i], next_ranks[i], group)
     if tensors_recv_next is not None:
-        for i, _ in enumerate(groups):
+        print(f'rank {rank} | tensors_recv_next is not None', flush=True)
+        next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
+        print(f'rank {rank} | next_ranks (2): {next_ranks}', flush=True)
+        for i, group in enumerate(groups):
+            # print(f'rank {rank} | tensors_recv_next[i]: {tensors_recv_next[i]}', flush=True)
+            print(f'rank {rank} | size: {tensors_recv_next[i].size()}', flush=True)
+            print(f'rank {rank} | next_ranks[i]: {next_ranks[i]}', flush=True)
             recv_next_op = torch.distributed.P2POp(
                 torch.distributed.irecv, tensors_recv_next[i],
-                get_pipeline_model_parallel_next_ranks()[i],
-                groups[i])
+                next_ranks[i],
+                group)
             ops.append(recv_next_op)
+            # torch.distributed.recv(tensors_recv_next[i], next_ranks[i], group)
     if len(ops) > 0:
+        import datetime
+        print(f'rank {rank} | before reqs, {datetime.datetime.now()}', flush = True)
         reqs = torch.distributed.batch_isend_irecv(ops)
+        print(f'rank {rank} | after reqs', flush=True)
     else:
         reqs = []
+    print(f'rank {rank} | leaving _batched_p2p_ops_w_components()', flush=True)
     return reqs
 
 def _p2p_ops(*,
@@ -218,96 +267,270 @@ def _p2p_ops(*,
              tensor_recv_prev: Optional[torch.Tensor],
              tensor_send_next: Optional[torch.Tensor],
              tensor_recv_next: Optional[torch.Tensor],
+             within_component: bool = False,
              group: torch.distributed.ProcessGroup):
+    rank = torch.distributed.get_rank()
     reqs = []
-    if tensor_send_next is not None:
-        send_next_req = torch.distributed.isend(
-            tensor=tensor_send_next,
-            dst=get_pipeline_model_parallel_next_ranks(),
-            group=group,
-        )
-        reqs.append(send_next_req)
+    if get_pipeline_model_parallel_rank() % 2 == 0:
+        if tensor_send_next is not None:
+            # print(f'rank {rank} | tensor_send_next: {tensor_send_next}', flush=True)
+            print(f'rank {rank} | send_next: {get_pipeline_model_parallel_next_ranks()}', flush=True)
+            send_next_req = torch.distributed.isend(
+                tensor=tensor_send_next,
+                dst=get_pipeline_model_parallel_next_ranks(),
+                group=group,
+            )
+            reqs.append(send_next_req)
 
-    if tensor_recv_prev is not None:
-        recv_prev_req = torch.distributed.irecv(
-            tensor=tensor_recv_prev,
-            src=get_pipeline_model_parallel_prev_ranks(),
-            group=group,
-        )
-        reqs.append(recv_prev_req)
+        if tensor_recv_prev is not None:
+            # print(f'rank {rank} | tensor_recv_prev: {tensor_recv_prev}', flush=True)
+            print(f'rank {rank} | recv_prev: {get_pipeline_model_parallel_prev_ranks()}', flush=True)        
+            recv_prev_req = torch.distributed.irecv(
+                tensor=tensor_recv_prev,
+                src=get_pipeline_model_parallel_prev_ranks(),
+                group=group,
+            )
+            reqs.append(recv_prev_req)
 
-    if tensor_send_prev is not None:
-        send_prev_req = torch.distributed.isend(
-            tensor=tensor_send_prev,
-            dst=get_pipeline_model_parallel_prev_ranks(),
-            group=group,
-        )
-        reqs.append(send_prev_req)
+        if tensor_send_prev is not None:
+            # print(f'rank {rank} | tensor_send_prev: {tensor_send_prev}', flush=True)
+            print(f'rank {rank} | send_prev: {get_pipeline_model_parallel_prev_ranks()}', flush=True)
+            send_prev_req = torch.distributed.isend(
+                tensor=tensor_send_prev,
+                dst=get_pipeline_model_parallel_prev_ranks(),
+                group=group,
+            )
+            reqs.append(send_prev_req)
 
-    if tensor_recv_next is not None:
-        recv_next_req = torch.distributed.irecv(
-            tensor=tensor_recv_next,
-            src=get_pipeline_model_parallel_next_ranks(),
-            group=group,
-        )
-        reqs.append(recv_next_req)
+        if tensor_recv_next is not None:
+            # print(f'rank {rank} | tensor_recv_next: {tensor_recv_next}', flush=True)
+            print(f'rank {rank} | recv_next: {get_pipeline_model_parallel_next_ranks()}', flush=True)
+            recv_next_req = torch.distributed.irecv(
+                tensor=tensor_recv_next,
+                src=get_pipeline_model_parallel_next_ranks(),
+                group=group,
+            )
+            reqs.append(recv_next_req)
+    else:
+        if tensor_recv_prev is not None:
+            # print(f'rank {rank} | tensor_recv_prev: {tensor_recv_prev}', flush=True)
+            print(f'rank {rank} | recv_prev: {get_pipeline_model_parallel_prev_ranks()}', flush=True)    
+            recv_prev_req = torch.distributed.irecv(
+                tensor=tensor_recv_prev,
+                src=get_pipeline_model_parallel_prev_ranks(),
+                group=group,
+            )
+            reqs.append(recv_prev_req)
+
+        if tensor_send_next is not None:
+            # print(f'rank {rank} | tensor_send_next: {tensor_send_next}', flush=True)
+            print(f'rank {rank} | send_next: {get_pipeline_model_parallel_next_ranks()}', flush=True)
+            send_next_req = torch.distributed.isend(
+                tensor=tensor_send_next,
+                dst=get_pipeline_model_parallel_next_ranks(),
+                group=group,
+            )
+            reqs.append(send_next_req)
+
+        if tensor_recv_next is not None:
+            # print(f'rank {rank} | tensor_recv_next: {tensor_recv_next}', flush=True)
+            print(f'rank {rank} | recv_next: {get_pipeline_model_parallel_next_ranks()}', flush=True)
+            recv_next_req = torch.distributed.irecv(
+                tensor=tensor_recv_next,
+                src=get_pipeline_model_parallel_next_ranks(),
+                group=group,
+            )
+            reqs.append(recv_next_req)
+
+        if tensor_send_prev is not None:
+            # print(f'rank {rank} | tensor_send_prev: {tensor_send_prev}', flush=True)
+            print(f'rank {rank} | send_prev: {get_pipeline_model_parallel_prev_ranks()}', flush=True)
+            send_prev_req = torch.distributed.isend(
+                tensor=tensor_send_prev,
+                dst=get_pipeline_model_parallel_prev_ranks(),
+                group=group,
+            )
+            reqs.append(send_prev_req)
+        
     return reqs
 
+# asdf
 def _p2p_ops_w_components(*,
              tensor_send_prev: Optional[torch.Tensor],
              tensors_recv_prev: Optional[torch.Tensor],
              tensor_send_next: Optional[torch.Tensor],
              tensors_recv_next: Optional[torch.Tensor],
+             within_component: bool = False,
              groups: List[torch.distributed.ProcessGroup] = None):
+    rank = torch.distributed.get_rank()
+    print(f'rank {rank} | in _p2p_ops_w_components()', flush=True)
     reqs = []
-    if tensor_send_next is not None:
-        num_groups = len(groups)
-        # if fan-in (from current rank), num_groups = 1
-        if num_groups == 1:
-            split_tensors = [tensor_send_next]
-        # if fan-out (from current rank), num_groups > 1
-        else:
-            split_tensors = tensor_send_next.chunk(num_groups)
-        for i, _ in enumerate(groups):
-            send_next_req = torch.distributed.isend(
-                tensor=split_tensors[i],
-                dst=get_pipeline_model_parallel_next_ranks()[i],
-                group=groups[i],
-            )
-            reqs.append(send_next_req)
+    if get_pipeline_model_parallel_rank() % 2 == 0:
+        # send first then receive
+        if tensor_send_next is not None:
+            print(f'rank {rank} | tensor_send_next is not None', flush=True)
+            next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
+            # print(f'rank {rank} | next_ranks (1): {next_ranks}', flush=True)
+            num_groups = len(groups)
+            # if fan-in, num_groups = 1
+            if num_groups == 1:
+                split_tensors = [tensor_send_next]
+            # if fan-out, num_groups > 1
+            elif num_groups >= 1:
+                split_sections = [
+                    get_ranks_micro_batch_size(next_node) for next_node in next_ranks[i]
+                ]
+                split_tensors = torch.split(tensor_send_next, split_sections, dim=1)
+            else:
+                raise ValueError("This error message should not appear, please file a bug.")
+            for i, group in enumerate(groups):
+                print(f'rank {rank} | size: {split_tensors[i].size()}', flush=True)
+                print(f'rank {rank} | next_ranks[i]: {next_ranks[i]}', flush=True)
+                send_next_req = torch.distributed.isend(
+                    tensor=split_tensors[i],
+                    dst=next_ranks[i],
+                    group=group,
+                )
+                reqs.append(send_next_req)
 
-    if tensors_recv_prev is not None:
-        for i, _ in enumerate(groups):
-            recv_prev_req = torch.distributed.irecv(
-                tensor=tensors_recv_prev[i],
-                src=get_pipeline_model_parallel_prev_ranks()[i],
-                group=groups[i],
-            )
-            reqs.append(recv_prev_req)
+        if tensors_recv_prev is not None:
+            print(f'rank {rank} | tensors_recv_prev is not None', flush=True)
+            prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
+            # print(f'rank {rank} | prev_ranks (2): {prev_ranks}', flush=True)
+            for i, group in enumerate(groups):
+                print(f'rank {rank} | size: {tensors_recv_prev[i].size()}', flush=True)
+                print(f'rank {rank} | prev_ranks[i]: {prev_ranks[i]}', flush=True)
+                recv_prev_req = torch.distributed.irecv(
+                    tensor=tensors_recv_prev[i],
+                    src=prev_ranks[i],
+                    group=group,
+                )
+                reqs.append(recv_prev_req)
 
-    if tensor_send_prev is not None:
-        num_groups = len(groups)
-        # if fan-in (from current rank), num_groups = 1
-        # if fan-out (from current rank), num_groups > 1
-        split_tensors = tensor_send_prev.chunk(num_groups)
-        for i in range(num_groups):
-            send_prev_req = torch.distributed.isend(
-                tensor=split_tensors[i],
-                dst=get_pipeline_model_parallel_prev_ranks()[i],
-                group=groups[i],
-            )
-            reqs.append(send_prev_req)
+        if tensor_send_prev is not None:
+            print(f'rank {rank} | tensor_send_prev is not None', flush=True)
+            prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
+            # print(f'rank {rank} | prev_ranks (1): {prev_ranks}', flush=True)
+            num_groups = len(groups)
+            # if fan-in, num_groups = 1
+            if num_groups == 1:
+                split_tensors = [tensor_send_prev]
+            # if fan-out, num_groups > 1
+            elif num_groups > 1:
+                split_sections = [
+                    get_ranks_micro_batch_size(prev_node) for prev_node in prev_ranks[i]
+                ]
+                split_tensors = torch.split(tensor_send_prev, split_sections, dim=1)
+            else:
+                raise ValueError("This error message should not appear, please file a bug.")
+            for i, group in enumerate(groups):
+                # print(f'rank {rank} | tensor_send_prev[i]: {split_tensors[i]}', flush=True)
+                print(f'rank {rank} | size: {split_tensors[i].size()}', flush=True)
+                print(f'rank {rank} | prev_ranks[i]: {prev_ranks[i]}', flush=True)
+                send_prev_req = torch.distributed.isend(
+                    tensor=split_tensors[i],
+                    dst=prev_ranks[i],
+                    group=group,
+                )
+                reqs.append(send_prev_req)
 
-    if tensors_recv_next is not None:
-        for i, _ in enumerate(groups):
-            recv_next_req = torch.distributed.irecv(
-                tensor=tensors_recv_next[i],
-                src=get_pipeline_model_parallel_next_ranks()[i],
-                group=groups[i],
-            )
-            reqs.append(recv_next_req)
+        if tensors_recv_next is not None:
+            print(f'rank {rank} | tensors_recv_next is not None', flush=True)
+            next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
+            print(f'rank {rank} | next_ranks (2): {next_ranks}', flush=True)
+            for i, group in enumerate(groups):
+                print(f'rank {rank} | size: {tensors_recv_next[i].size()}', flush=True)
+                print(f'rank {rank} | next_ranks[i]: {next_ranks[i]}', flush=True)
+                recv_next_req = torch.distributed.irecv(
+                    tensor=tensors_recv_next[i],
+                    src=next_ranks[i],
+                    group=group,
+                )
+                reqs.append(recv_next_req)
+    else:
+        # receive first then send
+        if tensors_recv_prev is not None:
+            print(f'rank {rank} | tensors_recv_prev is not None', flush=True)
+            prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
+            # print(f'rank {rank} | prev_ranks (2): {prev_ranks}', flush=True)
+            for i, group in enumerate(groups):
+                print(f'rank {rank} | size: {tensors_recv_prev[i].size()}', flush=True)
+                print(f'rank {rank} | prev_ranks[i]: {prev_ranks[i]}', flush=True)
+                recv_prev_req = torch.distributed.irecv(
+                    tensor=tensors_recv_prev[i],
+                    src=prev_ranks[i],
+                    group=group,
+                )
+                reqs.append(recv_prev_req)
 
+        if tensor_send_next is not None:
+            print(f'rank {rank} | tensor_send_next is not None', flush=True)
+            next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
+            # print(f'rank {rank} | next_ranks (1): {next_ranks}', flush=True)
+            num_groups = len(groups)
+            # if fan-in, num_groups = 1
+            if num_groups == 1:
+                split_tensors = [tensor_send_next]
+            # if fan-out, num_groups > 1
+            elif num_groups >= 1:
+                split_sections = [
+                    get_ranks_micro_batch_size(next_node) for next_node in next_ranks[i]
+                ]
+                split_tensors = torch.split(tensor_send_next, split_sections, dim=1)
+            else:
+                raise ValueError("This error message should not appear, please file a bug.")
+            for i, group in enumerate(groups):
+                print(f'rank {rank} | size: {split_tensors[i].size()}', flush=True)
+                print(f'rank {rank} | next_ranks[i]: {next_ranks[i]}', flush=True)
+                send_next_req = torch.distributed.isend(
+                    tensor=split_tensors[i],
+                    dst=next_ranks[i],
+                    group=group,
+                )
+                reqs.append(send_next_req)
 
+        if tensors_recv_next is not None:
+            print(f'rank {rank} | tensors_recv_next is not None', flush=True)
+            next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
+            print(f'rank {rank} | next_ranks (2): {next_ranks}', flush=True)
+            for i, group in enumerate(groups):
+                print(f'rank {rank} | size: {tensors_recv_next[i].size()}', flush=True)
+                print(f'rank {rank} | next_ranks[i]: {next_ranks[i]}', flush=True)
+                recv_next_req = torch.distributed.irecv(
+                    tensor=tensors_recv_next[i],
+                    src=next_ranks[i],
+                    group=group,
+                )
+                reqs.append(recv_next_req)
+
+        if tensor_send_prev is not None:
+            print(f'rank {rank} | tensor_send_prev is not None', flush=True)
+            prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
+            # print(f'rank {rank} | prev_ranks (1): {prev_ranks}', flush=True)
+            num_groups = len(groups)
+            # if fan-in, num_groups = 1
+            if num_groups == 1:
+                split_tensors = [tensor_send_prev]
+            # if fan-out, num_groups > 1
+            elif num_groups > 1:
+                split_sections = [
+                    get_ranks_micro_batch_size(prev_node) for prev_node in prev_ranks[i]
+                ]
+                split_tensors = torch.split(tensor_send_prev, split_sections, dim=1)
+            else:
+                raise ValueError("This error message should not appear, please file a bug.")
+            for i, group in enumerate(groups):
+                # print(f'rank {rank} | tensor_send_prev[i]: {split_tensors[i]}', flush=True)
+                print(f'rank {rank} | size: {split_tensors[i].size()}', flush=True)
+                print(f'rank {rank} | prev_ranks[i]: {prev_ranks[i]}', flush=True)
+                send_prev_req = torch.distributed.isend(
+                    tensor=split_tensors[i],
+                    dst=prev_ranks[i],
+                    group=group,
+                )
+                reqs.append(send_prev_req)
+
+    print(f'rank {rank} | leaving _p2p_ops_w_components', flush=True)
     return reqs
 
 def _communicate(*, tensor_send_next: Optional[torch.Tensor],
@@ -320,6 +543,7 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
                  dtype: Optional[torch.dtype],
                  variable_seq_lengths: bool = False,
                  use_ring_exchange_p2p: bool = False,
+                 within_component: bool = False
                  ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Communicate tensors between stages. Used as helper method in other
     communication methods that are used in megatron/schedules.py.
@@ -367,6 +591,10 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
             torch.distributed.batch_isend_irecv(). Requires custom
             built torch with torch.distributed.ring_exchange.
 
+        within_component (bool, optional, default = False):
+            Specifically when using interleaving and LayerUnitTestStrategy(),
+            this argument will identify whether to send/recv based on full model
+            pipeline parallel group or component pipeline parallel group
 
     Returns:
         tuple containing
@@ -375,7 +603,7 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
         - tensor_recv_next: torch.Tensor if recv_next is True, None otherwise.
 
     """
-
+    rank = torch.distributed.get_rank()
     # Create placeholder tensors for receive in forward and backward directions
     # if needed.
     tensor_recv_prev = None
@@ -421,6 +649,9 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
                                        dtype=dtype)
 
     # Send tensors in both the forward and backward directions as appropriate.
+    # print(f'rank {rank} | use_ring_exchange_p2p: ' + str(use_ring_exchange_p2p), flush=True)
+    # print(f'rank {rank} | batch_p2p_comm: ' + str(batch_p2p_comm), flush=True)
+    # print('get_pipeline_model_parallel_prev_ranks(): ' + str(get_pipeline_model_parallel_prev_ranks()))
     if use_ring_exchange_p2p:
         def _ring_exchange_wrapper(**kwargs):
             torch.distributed.ring_exchange(**kwargs)
@@ -431,18 +662,23 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
         p2p_func = _batched_p2p_ops_w_components if get_using_layer_unit_test_strategy() else _batched_p2p_ops
     else:
         p2p_func = _p2p_ops_w_components if get_using_layer_unit_test_strategy() else _p2p_ops
-
+    # print(f'rank {rank} | p2p_func: ' + str(p2p_func), flush=True)
     if get_using_layer_unit_test_strategy():
+        assert not use_ring_exchange_p2p, \
+            'use_ring_exchange_p2p is not yet implemented for LayerUnitTestStrategy()'
         tensors_recv_prev, tensors_recv_next = None, None
+        rank = torch.distributed.get_rank()
         if (tensor_recv_prev is not None):
-            prev_ranks = get_pipeline_model_parallel_prev_ranks()
+            print(f'rank: {rank} | get_prev', flush=True)
+            prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
             # if fan-in (from current rank), len(tensors_recv_prev) = 1
             if len(prev_ranks) == 1:
+                # print(f'rank {rank} | len(prev_ranks) == 1: {len(prev_ranks) == 1}')
                 split_tensors = [tensor_recv_prev]
             # if fan-out (from current rank), len(tensors_recv_prev) > 1
             elif len(prev_ranks) > 1:
                 split_sections = [
-                    get_ranks_micro_batch_size(prev_node) for prev_node in get_pipeline_model_parallel_prev_ranks()[i]
+                    get_ranks_micro_batch_size(prev_node) for prev_node in prev_ranks[i]
                 ]
                 # check that the split sections add up to the micro_batch_size
                 assert sum(split_sections) == tensor_recv_prev.size()[1]
@@ -451,14 +687,16 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
             for i, _ in enumerate(prev_ranks):
                 tensors_recv_prev.append(split_tensors[i])
         if (tensor_recv_next is not None):
-            next_ranks = get_pipeline_model_parallel_next_ranks()
+            print(f'rank: {rank} | get_next', flush=True)
+            next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
             # if fan-in (from current rank), len(tensors_recv_next) = 1
             if len(next_ranks) == 1:
+                # print(f'rank {rank} | len(next_rank) == 1: {len(next_ranks) == 1}')
                 split_tensors = [tensor_recv_next]
             # if fan-out (from current rank), len(tensors_recv_next) > 1
             elif len(next_ranks) > 1:
                 split_sections = [
-                    get_ranks_micro_batch_size(next_node) for next_node in get_pipeline_model_parallel_next_ranks()[i]
+                    get_ranks_micro_batch_size(next_node) for next_node in next_ranks[i]
                 ]
                 # check that the split sections add up to the micro_batch_size
                 assert sum(split_sections) == tensor_recv_prev.size()[1]
@@ -471,10 +709,14 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
 
         # if there are multiple prev_groups, fan in, tensor size should remain the same
         # if there are multiple next_groups, fan out, tensor size should be split
+        # print(f'rank {rank} | getting reqs', flush=True)
+        # print(f'rank {rank} | get_pipeline_model_parallel_groups(): {get_pipeline_model_parallel_groups()}', flush=True)
+        print(f'rank {rank} calling p2p_func')
         reqs = p2p_func(tensor_send_prev=tensor_send_prev,
                         tensors_recv_prev=tensors_recv_prev,
                         tensor_send_next=tensor_send_next,
                         tensors_recv_next=tensors_recv_next,
+                        within_component=within_component,
                         groups=get_pipeline_model_parallel_groups())
     else:
         reqs = p2p_func(tensor_send_prev=tensor_send_prev,
@@ -482,37 +724,49 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
                         tensor_send_next=tensor_send_next,
                         tensor_recv_next=tensor_recv_next,
                         group=get_pipeline_model_parallel_group())
-
+    print(f'rank {rank} | before wait on reqs', flush=True)
     if wait_on_reqs and len(reqs) > 0:
         for req in reqs:
             req.wait()
         reqs = None
-
+    import datetime
+    print(f'rank {rank} | after wait on reqs, {datetime.datetime.now()}', flush = True)
     if batch_p2p_comm and batch_p2p_sync:
         # To protect against race condition when using batch_isend_irecv().
         # User should assert that we have a modern enough PyTorch to not need this
         torch.cuda.synchronize()
 
+    print(f'rank {rank} | after torch.cuda.synchronize()', flush=True)
+
     # TODO: combine tensors for fan-in
+    # print(f'rank {rank} | combine tensors', flush=True)
     if get_using_layer_unit_test_strategy():
         if tensors_recv_prev is not None:
+            # print(f'rank {rank} | tensor_recv_prev before: {tensor_recv_prev}', flush=True)
             tensor_recv_prev = torch.cat(tensors_recv_prev)
+            # print(f'rank {rank} | tensor_recv_prev after: {tensor_recv_prev}', flush=True)
         if tensors_recv_next is not None:
+            # print(f'rank {rank} | tensors_recv_next before: {tensors_recv_next}', flush=True)
             tensor_recv_next = torch.cat(tensors_recv_next)
+            # print(f'rank {rank} | tensors_recv_next after: {tensors_recv_next}', flush=True)
 
+    print(f'rank {rank} | leaving _communicate()', flush=True)
     return tensor_recv_prev, tensor_recv_next, reqs
 
 
 def recv_forward(tensor_shape: Shape,
                  dtype: torch.dtype,
                  batch_p2p_comm: bool = True,
-                 timers: Callable = None) -> torch.Tensor:
+                 timers: Callable = None,
+                 within_component: bool = False) -> torch.Tensor:
     """ Receive tensor from previous rank in pipeline (forward receive).
 
 
     See _communicate for argument details.
     """
-
+    rank = torch.distributed.get_rank()
+    print(f'rank {rank} | in recv_forward')
+    print(f'rank {rank} | core.parallel_state.is_pipeline_first_stage(): {core.parallel_state.is_pipeline_first_stage()}')
     if core.parallel_state.is_pipeline_first_stage():
         input_tensor = None
     else:
@@ -525,7 +779,8 @@ def recv_forward(tensor_shape: Shape,
             recv_next=False,
             tensor_shape=tensor_shape,
             batch_p2p_comm=batch_p2p_comm,
-            dtype=dtype)
+            dtype=dtype,
+            within_component=within_component)
         if timers is not None:
             timers('forward-recv').stop()
     return input_tensor
@@ -559,7 +814,8 @@ def recv_backward(tensor_shape: Shape,
 
 def send_forward(output_tensor: torch.Tensor,
                  batch_p2p_comm: bool = True,
-                 timers: Callable = None) -> None:
+                 timers: Callable = None,
+                 within_component: bool = False) -> None:
     """Send tensor to next rank in pipeline (forward send).
 
     See _communicate for argument details.
@@ -576,7 +832,8 @@ def send_forward(output_tensor: torch.Tensor,
             recv_next=False,
             tensor_shape=None,
             batch_p2p_comm=batch_p2p_comm,
-            dtype=None)
+            dtype=None,
+            within_component=within_component)
         nvtx.end_range(rng)
         if timers is not None:
             timers('forward-send').stop()
@@ -664,13 +921,17 @@ def send_forward_recv_forward(output_tensor: torch.Tensor,
                               dtype: torch.dtype,
                               batch_p2p_comm: bool = True,
                               overlap_p2p_comm: bool = False,
-                              timers: Callable = None) -> torch.Tensor:
+                              timers: Callable = None,
+                              within_component: bool = False) -> torch.Tensor:
     """Batched recv from previous rank and send to next rank in pipeline.
 
     See _communicate for argument details.
     """
     if timers is not None:
         timers('forward-send-forward-recv', log_level=2).start()
+    rank = torch.distributed.get_rank()
+    print(f'rank {rank} | in p2p_comms, send_forward_recv_forward. ', flush=True)
+    print(f'rank {rank} | recv_prev: ' + str(recv_prev), flush=True)
     input_tensor, _, wait_handles = _communicate(
         tensor_send_next=output_tensor,
         tensor_send_prev=None,
@@ -679,9 +940,11 @@ def send_forward_recv_forward(output_tensor: torch.Tensor,
         tensor_shape=tensor_shape,
         batch_p2p_comm=batch_p2p_comm,
         wait_on_reqs=(not overlap_p2p_comm),
-        dtype=dtype)
+        dtype=dtype,
+        within_component=within_component)
     if timers is not None:
         timers('forward-send-forward-recv').stop()
+    print(f'rank {rank} | return input_tensor from send_forward_recv_forward', flush=True)
     if overlap_p2p_comm:
         return input_tensor, wait_handles
     return input_tensor
@@ -693,7 +956,8 @@ def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
                                 dtype: torch.dtype,
                                 batch_p2p_comm: bool = True,
                                 overlap_p2p_comm: bool = False,
-                                timers: Callable = None) -> torch.Tensor:
+                                timers: Callable = None,
+                                within_component: bool = False) -> torch.Tensor:
     """Batched recv from next rank and send to previous rank in pipeline.
 
     See _communicate for argument details.
@@ -708,7 +972,8 @@ def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
         tensor_shape=tensor_shape,
         batch_p2p_comm=batch_p2p_comm,
         wait_on_reqs=(not overlap_p2p_comm),
-        dtype=dtype)
+        dtype=dtype,
+        within_component=within_component)
     if timers is not None:
         timers('backward-send-backward-recv').stop()
     if overlap_p2p_comm:
@@ -724,14 +989,19 @@ def send_forward_backward_recv_forward_backward(
         tensor_shape: Shape,
         dtype: torch.dtype,
         batch_p2p_comm: bool = True,
-        timers: Callable = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        timers: Callable = None,
+        within_component: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
     """Batched send and recv with previous and next ranks in pipeline.
 
     See _communicate for argument details.
     """
+    rank = torch.distributed.get_rank()
+    print(f'rank {rank} | in p2p_comms, send_forward_backward_recv_forward_backward. ', flush=True)
+
     if timers is not None:
         timers('forward-backward-send-forward-backward-recv',
                log_level=2).start()
+    # input_tensor, recv_prev, #output_tensor_grad, recv_next
     input_tensor, output_tensor_grad, _ = _communicate(
         tensor_send_next=output_tensor,
         tensor_send_prev=input_tensor_grad,
@@ -739,7 +1009,8 @@ def send_forward_backward_recv_forward_backward(
         recv_next=recv_next,
         tensor_shape=tensor_shape,
         batch_p2p_comm=batch_p2p_comm,
-        dtype=dtype)
+        dtype=dtype,
+        within_component=within_component)
     if timers is not None:
         timers('forward-backward-send-forward-backward-recv').stop()
     return input_tensor, output_tensor_grad
