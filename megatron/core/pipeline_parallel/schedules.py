@@ -544,15 +544,78 @@ def forward_backward_pipelining_with_interleaving(*,
             all_warmup_microbatches = True
         else:
             if parallel_state.get_using_layer_unit_test_strategy():
-                num_warmup_microbatches = \
-                    (pipeline_component_parallel_size - pipeline_component_parallel_rank - 1) * 2
-                num_warmup_microbatches += (
-                    num_model_chunks - 1) * pipeline_component_parallel_size
+                # define pipeline parallel sizes for all components
+                stimulus_component_pipeline_parallel_size = parallel_state.get_pipeline_component_parallel_world_size('stimulus')
+                test_component_pipeline_parallel_size = parallel_state.get_pipeline_component_parallel_world_size('test')
+                response_component_pipeline_parallel_size = parallel_state.get_pipeline_component_parallel_world_size('response')
 
+                # in last component
+                if parallel_state.is_rank_in_last_component():
+                    num_warmup_microbatches = \
+                        (response_component_pipeline_parallel_size - pipeline_component_parallel_rank - 1) * 2
+                    num_warmup_microbatches += (
+                        num_model_chunks - 1) * response_component_pipeline_parallel_size
+
+                # in middle component
                 if not parallel_state.is_rank_in_last_component():
-                    num_warmup_microbatches += 2 * (num_model_chunks * parallel_state.get_pipeline_component_parallel_world_size('response'))
+                    # minimum number is number of warmup steps in the first rank of the next component 
+                    # + number of steps it takes after receive the first backward batch before it can start
+                    # sending batches backward to middle component.
+
+                    response_component_num_warmup_microbatches = \
+                        (response_component_pipeline_parallel_size - 1) * 2 \
+                        + (num_model_chunks - 1) * response_component_pipeline_parallel_size
+                    response_component_first_rank_num_additional_steps = \
+                        (num_model_chunks - 1) * response_component_pipeline_parallel_size
+                    
+                    # number of steps this rank ran before the next rank started its warmup
+                    initial_steps_before = (num_model_chunks - 1) * test_component_pipeline_parallel_size + 1
+
+                    min_num_warmup_steps = \
+                        response_component_num_warmup_microbatches + response_component_first_rank_num_additional_steps + initial_steps_before
+
+                    # iterate num_warmup_microbatches until it is larger than min_num_warmup_steps
+                    num_warmup_microbatches = (num_model_chunks - 1) * test_component_pipeline_parallel_size
+                    while num_warmup_microbatches <= min_num_warmup_steps:
+                        num_warmup_microbatches += (num_model_chunks) * test_component_pipeline_parallel_size
+
+                    # add based on rank in component
+                    num_warmup_microbatches += \
+                        (test_component_pipeline_parallel_size - pipeline_component_parallel_rank - 1) * 2
+
+                # in first component
                 if parallel_state.is_rank_in_first_component():
-                    num_warmup_microbatches += 2 * (num_model_chunks * parallel_state.get_pipeline_component_parallel_world_size('test'))
+                    response_component_pipeline_parallel_size = parallel_state.get_pipeline_component_parallel_world_size('test')
+
+                    # calculate number of warmup microbatches of first rank in the next rank
+                    # using min_num_warmup_steps calculated in previous if statement
+
+                    # iterate num_warmup_microbatches until it is larger than min_num_warmup_steps
+                    response_component_num_warmup_microbatches = (num_model_chunks - 1) * response_component_pipeline_parallel_size
+                    while response_component_num_warmup_microbatches < min_num_warmup_steps:
+                        response_component_num_warmup_microbatches += (num_model_chunks) * response_component_pipeline_parallel_size
+
+                    # add based on rank in component
+                    response_component_num_warmup_microbatches += \
+                        (response_component_pipeline_parallel_size - 1) * 2
+
+                    response_component_first_rank_num_additional_steps = \
+                        (num_model_chunks - 1) * response_component_pipeline_parallel_size
+
+                    # number of steps this rank started before the next rank started its warmup
+                    initial_steps_before = (num_model_chunks - 1) * stimulus_component_pipeline_parallel_size + 1
+
+                    min_num_warmup_steps = \
+                        response_component_num_warmup_microbatches + response_component_first_rank_num_additional_steps + initial_steps_before
+
+                    # iterate num_warmup_microbatches until it is larger than min_num_warmup_steps
+                    num_warmup_microbatches = (num_model_chunks - 1) * stimulus_component_pipeline_parallel_size
+                    while num_warmup_microbatches <= min_num_warmup_steps:
+                        num_warmup_microbatches += (num_model_chunks) * stimulus_component_pipeline_parallel_size
+
+                    # add based on rank in component
+                    num_warmup_microbatches += \
+                        (stimulus_component_pipeline_parallel_size - pipeline_component_parallel_rank - 1) * 2
             else:
                 num_warmup_microbatches = \
                     (pipeline_model_parallel_size - pipeline_model_parallel_rank - 1) * 2
