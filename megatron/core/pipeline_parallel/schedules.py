@@ -1513,7 +1513,8 @@ def forward_backward_pipelining_without_interleaving(*,
     stages.
 
     Returns dictionary with losses if the last stage, empty dict otherwise."""
-
+    rank = torch.distributed.get_rank()
+    print(f'rank {rank} | ----IN SCHEDULE----')
     if isinstance(model, list):
         assert len(model) == 1, \
             "non-interleaved pipeline parallelism does not support model chunking"
@@ -1595,9 +1596,14 @@ def forward_backward_pipelining_without_interleaving(*,
         else:
             nvtx.mark(message=f"fwd_pass_warmup: {i}, rank: {rank}", color="orange")
         input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
+        print(f'rank {rank} | recv_forward {input_tensor}', flush=True)
+        
         output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                      input_tensor, forward_data_store,
                                      timers, collect_non_loss_data, dtype, enable_autocast)
+        print(f'rank {rank} | forward step', flush=True)
+        
+        print(f'rank {rank} | send_forward {output_tensor}', flush=True)
         send_forward(output_tensor, send_tensor_shapes, timers=timers)
 
         if not forward_only:
@@ -1612,6 +1618,7 @@ def forward_backward_pipelining_without_interleaving(*,
     # receive this tensor here.
     if num_microbatches_remaining > 0:
         input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
+        print(f'rank {rank} | recv_forward {input_tensor}', flush=True)
 
     steady_state_rng = nvtx.start_range(message="fwd_pass_steady_state", color="darkgreen")
     # Run 1F1B in steady state.
@@ -1621,18 +1628,22 @@ def forward_backward_pipelining_without_interleaving(*,
         output_tensor = forward_step(forward_step_func, data_iterator, model, num_microbatches,
                                      input_tensor, forward_data_store,
                                      timers, collect_non_loss_data, dtype, enable_autocast)
+        print(f'rank {rank} | forward step', flush=True)
 
         if forward_only:
             send_forward(output_tensor, send_tensor_shapes, timers=timers)
-
+            print(f'rank {rank} | send_forward {output_tensor}', flush=True)
             if not last_iteration:
                 input_tensor = recv_forward(recv_tensor_shapes, dtype, timers=timers)
+                print(f'rank {rank} | recv_forward {input_tensor}', flush=True)
 
         else:
             output_tensor_grad = \
                 send_forward_recv_backward(output_tensor,
                                            send_tensor_shapes, dtype,
                                            timers=timers)
+            print(f'rank {rank} | send_forward_recv_backward send {output_tensor}', flush=True)
+            print(f'rank {rank} | send_forward_recv_backward recv {output_tensor_grad}', flush=True)
 
             # Add input_tensor and output_tensor to end of list.
             input_tensors.append(input_tensor)
@@ -1647,14 +1658,18 @@ def forward_backward_pipelining_without_interleaving(*,
             input_tensor_grad = \
                 backward_step(grad_scaler, input_tensor, output_tensor,
                               output_tensor_grad, model_type, timers, deallocate_pipeline_outputs)
-
+            print(f'rank {rank} | backward step', flush=True)
             if last_iteration:
                 input_tensor = None
                 send_backward(input_tensor_grad, recv_tensor_shapes, timers=timers)
+                print(f'rank {rank} | send_backward {input_tensor_grad}', flush=True)
+                
             else:
                 input_tensor = \
                     send_backward_recv_forward(
                         input_tensor_grad, recv_tensor_shapes, dtype, timers=timers)
+                print(f'rank {rank} | send_backward_recv_forward send {input_tensor_grad}', flush=True)
+                print(f'rank {rank} | send_backward_recv_forward recv {input_tensor}', flush=True)
 
     nvtx.end_range(steady_state_rng)
     # Run cooldown backward passes.
@@ -1674,12 +1689,15 @@ def forward_backward_pipelining_without_interleaving(*,
             output_tensor = output_tensors.pop(0)
 
             output_tensor_grad = recv_backward(send_tensor_shapes, dtype, timers=timers)
+            print(f'rank {rank} | recv_backward {output_tensor_grad}', flush=True)
 
             input_tensor_grad = \
                 backward_step(grad_scaler, input_tensor, output_tensor,
                               output_tensor_grad, model_type, timers, deallocate_pipeline_outputs)
+            print(f'rank {rank} | backward step', flush=True)
 
             send_backward(input_tensor_grad, recv_tensor_shapes, timers=timers)
+            print(f'rank {rank} | send_backward {input_tensor_grad}', flush=True)
 
     # Launch any remaining grad reductions
     if no_sync_context is not None:
@@ -1687,4 +1705,5 @@ def forward_backward_pipelining_without_interleaving(*,
         if grad_sync_func is not None:
             grad_sync_func(model.parameters())
 
+    print(f'rank {rank} | ----LEAVING SCHEDULE----')
     return forward_data_store
