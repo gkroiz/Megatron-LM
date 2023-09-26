@@ -164,7 +164,9 @@ def _batched_p2p_ops_w_components(*,
                      group: torch.distributed.ProcessGroup):
     rank = torch.distributed.get_rank()
     print(f'rank {rank} | group: ', group, flush=True)
-    ops = []
+    all_ops = {
+        
+    }
     if tensor_send_prev is not None:
         prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
         print(f'rank {rank} | prev_ranks: {prev_ranks}', flush=True)
@@ -190,7 +192,11 @@ def _batched_p2p_ops_w_components(*,
                 torch.distributed.isend, split_tensors[i],
                 prev_rank,
                 group)
-            ops.append(send_prev_op)
+            print(f'rank {rank} | send_prev_op: {send_prev_op}', flush=True)
+            if prev_rank in all_ops:
+                all_ops[prev_rank].append(send_prev_op)
+            else:
+                all_ops[prev_rank] = [send_prev_op]
     if tensors_recv_prev is not None:
         prev_ranks = [get_pipeline_component_parallel_prev_ranks()] if within_component else get_pipeline_model_parallel_prev_ranks()
         print(f'rank {rank} | prev_ranks: {prev_ranks}', flush=True)
@@ -206,7 +212,11 @@ def _batched_p2p_ops_w_components(*,
                 torch.distributed.irecv, tensors_recv_prev[i],
                 prev_rank,
                 group)
-            ops.append(recv_prev_op)
+            print(f'rank {rank} | recv_prev_op: {recv_prev_op}', flush=True)
+            if prev_rank in all_ops:
+                all_ops[prev_rank].append(recv_prev_op)
+            else:
+                all_ops[prev_rank] = [recv_prev_op]
     if tensor_send_next is not None:
         next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
         print(f'rank {rank} | next_ranks: {next_ranks}', flush=True)
@@ -234,7 +244,11 @@ def _batched_p2p_ops_w_components(*,
                 torch.distributed.isend, split_tensors[i],
                 next_rank,
                 group)
-            ops.append(send_next_op)
+            print(f'rank {rank} | send_next_op: {send_next_op}', flush=True)
+            if next_rank in all_ops:
+                all_ops[next_rank].append(send_next_op)
+            else:
+                all_ops[next_rank] = [send_next_op]
     if tensors_recv_next is not None:
         next_ranks = [get_pipeline_component_parallel_next_ranks()] if within_component else get_pipeline_model_parallel_next_ranks()
         print(f'rank {rank} | next_ranks: {next_ranks}', flush=True)
@@ -250,15 +264,33 @@ def _batched_p2p_ops_w_components(*,
                 torch.distributed.irecv, tensors_recv_next[i],
                 next_rank,
                 group)
-            ops.append(recv_next_op)
+            print(f'rank {rank} | recv_next_op: {recv_next_op}', flush=True)
+            if next_rank in all_ops:
+                all_ops[next_rank].append(recv_next_op)
+            else:
+                all_ops[next_rank] = [recv_next_op]
 
     print(f'rank {rank} | before torch.distributed.batch_isend_irecv(ops)', flush=True)
-    if len(ops) > 0:
-        reqs = torch.distributed.batch_isend_irecv(ops)
+    print(f'rank {rank} | all_ops: ', all_ops, flush=True)
+    print(f'rank {rank} | len(all_ops): ', len(all_ops), flush=True)
+    if len(all_ops) > 0:
+        if len(all_ops) == 2:
+            ops = list(all_ops.values())[0] + list(all_ops.values())[1]
+            print(f'rank {rank} | before ops: {ops}', flush=True)
+            all_reqs = torch.distributed.batch_isend_irecv(ops)
+            print(f'rank {rank} | after ops: {ops}', flush=True)
+        else:
+            all_reqs = []
+            for ops in list(all_ops.values()):
+                print(f'rank {rank} | before ops: {ops}', flush=True)
+                reqs = torch.distributed.batch_isend_irecv(ops)
+                print(f'rank {rank} | after ops: {ops}', flush=True)
+                
+                all_reqs += reqs
     else:
-        reqs = []
+        all_reqs = []
     print(f'rank {rank} | leaving _batched_p2p_component_ops', flush=True)
-    return reqs
+    return all_reqs
 
 # def _batched_p2p_ops_w_components(*,
 #                      tensor_send_prev: Optional[torch.Tensor],
