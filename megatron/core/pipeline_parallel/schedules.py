@@ -443,7 +443,7 @@ def forward_backward_pipelining_with_interleaving(*,
 
     if overlap_p2p_comm and batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
-
+    print('in forward_backward_pipelining_with_interleaving!')
     # Disable async grad reductions
     if no_sync_func is None and all(isinstance(chunk, torchDDP) for chunk in model):
         def multi_no_sync():
@@ -1085,6 +1085,7 @@ def forward_backward_pipelining_without_interleaving(*,
     stages.
 
     Returns dictionary with losses if the last stage, empty dict otherwise."""
+    print('in forward_backward_pipelining_without_interleaving!')
 
     if isinstance(model, list):
         assert len(model) == 1, \
