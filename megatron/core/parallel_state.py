@@ -296,6 +296,7 @@ def initialize_model_parallel(
 
 def initialize_model_components_parallel(
     parallelization_specs: dict,
+    virtual_pipeline_model_parallel_size: Optional[int] = None,
     pipeline_model_parallel_split_rank: Optional[int] = None,
     use_fp8: bool = False,
 ) -> None:
@@ -357,6 +358,15 @@ def initialize_model_components_parallel(
                 f"component world_size ({world_sizes[k]}) is not divisible by tensor_model_parallel_size "
                 f"({tensor_model_parallel_group_sizes[k]}) x pipeline_model_parallel_size ({pipeline_model_parallel_group_sizes[k]})"
             )
+
+    if virtual_pipeline_model_parallel_size is not None:
+        if not sum(list(pipeline_model_parallel_group_sizes.values())) > 2:
+            raise RuntimeError("pipeline-model-parallel size should be greater than 2 with "
+                               "interleaved schedule")
+        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
+        global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+        _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = 0
+        _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = virtual_pipeline_model_parallel_size
 
     if pipeline_model_parallel_split_rank is not None:
         global _PIPELINE_MODEL_PARALLEL_SPLIT_RANK
