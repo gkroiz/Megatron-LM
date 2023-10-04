@@ -30,13 +30,13 @@ _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
 _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
 
 # Previous pipeline model rank based on current rank.
-_PREV_PIPELINE_MODEL_PARALLEL_RANK = None
+_PREV_PIPELINE_MODEL_PARALLEL_RANKS = []
 # Next pipeline model rank based on current rank.
-_NEXT_PIPELINE_MODEL_PARALLEL_RANK = None
+_NEXT_PIPELINE_MODEL_PARALLEL_RANKS = []
 # First pipeline model rank based on current rank.
-_FIRST_PIPELINE_MODEL_PARALLEL_RANK = None
+_FIRST_PIPELINE_MODEL_PARALLEL_RANKS = []
 # Last pipeline model rank based on current rank.
-_LAST_PIPELINE_MODEL_PARALLEL_RANK = None
+_LAST_PIPELINE_MODEL_PARALLEL_RANKS = []
 
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
@@ -445,10 +445,10 @@ def initialize_model_components_parallel(
     global _PIPELINE_MODEL_PARALLEL_GROUPS
     global _PIPELINE_GLOBAL_RANKS
     global _PIPELINE_COMPONENT_GLOBAL_RANKS
-    global _PREV_PIPELINE_MODEL_PARALLEL_RANK
-    global _NEXT_PIPELINE_MODEL_PARALLEL_RANK
-    global _FIRST_PIPELINE_MODEL_PARALLEL_RANK
-    global _LAST_PIPELINE_MODEL_PARALLEL_RANK
+    global _PREV_PIPELINE_MODEL_PARALLEL_RANKS
+    global _NEXT_PIPELINE_MODEL_PARALLEL_RANKS
+    global _FIRST_PIPELINE_MODEL_PARALLEL_RANKS
+    global _LAST_PIPELINE_MODEL_PARALLEL_RANKS
     global _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS
     global _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS
     global _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS
@@ -512,12 +512,12 @@ def initialize_model_components_parallel(
 
                 # define previous and next ranks in pipeline model parallel group
                 ranks_index = pipeline_model_parallel_ranks.index(rank)
-                _PREV_PIPELINE_MODEL_PARALLEL_RANK = pipeline_model_parallel_ranks[ranks_index-1] if ranks_index-1 >= 0 else -1
-                _NEXT_PIPELINE_MODEL_PARALLEL_RANK = pipeline_model_parallel_ranks[ranks_index+1] if ranks_index+1 < len(pipeline_model_parallel_ranks) else -1
+                _PREV_PIPELINE_MODEL_PARALLEL_RANKS.append(pipeline_model_parallel_ranks[ranks_index-1] if ranks_index-1 >= 0 else -1)
+                _NEXT_PIPELINE_MODEL_PARALLEL_RANKS.append(pipeline_model_parallel_ranks[ranks_index+1] if ranks_index+1 < len(pipeline_model_parallel_ranks) else -1)
 
                 # define first and last ranks in pipeline modell parallel group
-                _FIRST_PIPELINE_MODEL_PARALLEL_RANK = ranks[0]
-                _LAST_PIPELINE_MODEL_PARALLEL_RANK = ranks[-1]
+                _FIRST_PIPELINE_MODEL_PARALLEL_RANKS.append(pipeline_model_parallel_ranks[0])
+                _LAST_PIPELINE_MODEL_PARALLEL_RANKS.append(pipeline_model_parallel_ranks[-1])
 
     # Build the embedding groups (first and last rank in each pipeline model-parallel group).
     # The embedding groups are defined based on the entire model, not individual components
@@ -992,26 +992,39 @@ def get_data_parallel_src_rank():
     return _DATA_PARALLEL_GLOBAL_RANKS[0]
 
 
-def get_pipeline_model_parallel_first_rank():
+def get_pipeline_model_parallel_first_rank(index=0):
     """Return the global rank of the first process in the pipeline for the
-    current tensor parallel group"""
+    current tensor parallel group (based on input index)"""
     if get_using_layer_unit_test_strategy():
-        assert _FIRST_PIPELINE_MODEL_PARALLEL_RANK is not None, \
+        assert len(_FIRST_PIPELINE_MODEL_PARALLEL_RANKS) != 0, \
             "First pipeline parallel model rank is not initialized"
-        return _FIRST_PIPELINE_MODEL_PARALLEL_RANK
+        return _FIRST_PIPELINE_MODEL_PARALLEL_RANKS[index]
     else:
         assert _PIPELINE_GLOBAL_RANKS is not None, \
             "Pipeline parallel group is not initialized"
         return _PIPELINE_GLOBAL_RANKS[0]
 
 
-def get_pipeline_model_parallel_last_rank():
-    """Return the global rank of the last process in the pipeline for the
+def get_pipeline_model_parallel_first_ranks():
+    """Return all global rank of the first process in the pipeline for the
     current tensor parallel group"""
     if get_using_layer_unit_test_strategy():
-        assert _LAST_PIPELINE_MODEL_PARALLEL_RANK is not None, \
+        assert len(_FIRST_PIPELINE_MODEL_PARALLEL_RANKS) != 0, \
+            "First pipeline parallel model rank is not initialized"
+        return _FIRST_PIPELINE_MODEL_PARALLEL_RANKS
+    else:
+        assert _PIPELINE_GLOBAL_RANKS is not None, \
+            "Pipeline parallel group is not initialized"
+        return [_PIPELINE_GLOBAL_RANKS[0]]
+
+
+def get_pipeline_model_parallel_last_rank(index=0):
+    """Return the global rank of the last process in the pipeline for the
+    current tensor parallel group (based on input index)"""
+    if get_using_layer_unit_test_strategy():
+        assert len(_LAST_PIPELINE_MODEL_PARALLEL_RANKS) != 0, \
             "Last pipeline parallel model rank is not initialized"
-        return _LAST_PIPELINE_MODEL_PARALLEL_RANK
+        return _LAST_PIPELINE_MODEL_PARALLEL_RANKS[index]
     else:
         assert _PIPELINE_GLOBAL_RANKS is not None, \
             "Pipeline parallel group is not initialized"
@@ -1019,14 +1032,28 @@ def get_pipeline_model_parallel_last_rank():
         return _PIPELINE_GLOBAL_RANKS[last_rank_local]
 
 
-def get_pipeline_model_parallel_next_rank():
-    """Return the global rank that follows the caller in the pipeline"""
+def get_pipeline_model_parallel_last_ranks():
+    """Return all global rank of the last process in the pipeline for the
+    current tensor parallel group based on index"""
     if get_using_layer_unit_test_strategy():
-        assert _NEXT_PIPELINE_MODEL_PARALLEL_RANK is not None, \
+        assert len(_LAST_PIPELINE_MODEL_PARALLEL_RANKS) != 0, \
+            "Last pipeline parallel model rank is not initialized"
+        return _LAST_PIPELINE_MODEL_PARALLEL_RANKS
+    else:
+        assert _PIPELINE_GLOBAL_RANKS is not None, \
+            "Pipeline parallel group is not initialized"
+        last_rank_local = get_pipeline_model_parallel_world_size() - 1
+        return [_PIPELINE_GLOBAL_RANKS[last_rank_local]]
+
+
+def get_pipeline_model_parallel_next_rank(index=0):
+    """Return the global rank that follows the caller in the pipeline (based on input index)"""
+    if get_using_layer_unit_test_strategy():
+        assert len(_NEXT_PIPELINE_MODEL_PARALLEL_RANKS) != 0, \
             "Next pipeline parallel model rank is not initialized"
-        assert _NEXT_PIPELINE_MODEL_PARALLEL_RANK != -1, \
+        assert -1 not in _NEXT_PIPELINE_MODEL_PARALLEL_RANKS, \
             "Current rank does not have a a next pipeline model parallel rank"
-        return _NEXT_PIPELINE_MODEL_PARALLEL_RANK
+        return _NEXT_PIPELINE_MODEL_PARALLEL_RANKS[index]
     else:
         assert _PIPELINE_GLOBAL_RANKS is not None, \
             "Pipeline parallel group is not initialized"
@@ -1035,20 +1062,52 @@ def get_pipeline_model_parallel_next_rank():
         return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]
 
 
-def get_pipeline_model_parallel_prev_rank():
-    """Return the global rank that preceeds the caller in the pipeline"""
+def get_pipeline_model_parallel_next_ranks():
+    """Return all global rank that follows the caller in the pipeline"""
     if get_using_layer_unit_test_strategy():
-        assert _PREV_PIPELINE_MODEL_PARALLEL_RANK is not None, \
+        assert len(_NEXT_PIPELINE_MODEL_PARALLEL_RANKS) != 0, \
+            "Next pipeline parallel model rank is not initialized"
+        assert -1 not in _NEXT_PIPELINE_MODEL_PARALLEL_RANKS, \
+            "Current rank does not have a a next pipeline model parallel rank"
+        return _NEXT_PIPELINE_MODEL_PARALLEL_RANKS
+    else:
+        assert _PIPELINE_GLOBAL_RANKS is not None, \
+            "Pipeline parallel group is not initialized"
+        rank_in_pipeline = get_pipeline_model_parallel_rank()
+        world_size = get_pipeline_model_parallel_world_size()
+        return [_PIPELINE_GLOBAL_RANKS[(rank_in_pipeline + 1) % world_size]]
+
+
+def get_pipeline_model_parallel_prev_rank(index=0):
+    """Return the global rank that preceeds the caller in the pipeline (based on input index)"""
+    if get_using_layer_unit_test_strategy():
+        assert len(_PREV_PIPELINE_MODEL_PARALLEL_RANKS) != 0, \
             "Previous pipeline parallel group is not initialized"
-        assert _PREV_PIPELINE_MODEL_PARALLEL_RANK != -1, \
+        assert -1 not in _PREV_PIPELINE_MODEL_PARALLEL_RANKS, \
             "Current rank does not have a a previous pipeline model parallel rank"
-        return _PREV_PIPELINE_MODEL_PARALLEL_RANK
+        return _PREV_PIPELINE_MODEL_PARALLEL_RANKS[index]
     else:
         assert _PIPELINE_GLOBAL_RANKS is not None, \
             "Pipeline parallel group is not initialized"
         rank_in_pipeline = get_pipeline_model_parallel_rank()
         world_size = get_pipeline_model_parallel_world_size()
         return _PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]
+
+
+def get_pipeline_model_parallel_prev_ranks():
+    """Return all global rank that preceeds the caller in the pipeline"""
+    if get_using_layer_unit_test_strategy():
+        assert len(_PREV_PIPELINE_MODEL_PARALLEL_RANKS) != 0, \
+            "Previous pipeline parallel group is not initialized"
+        assert -1 not in _PREV_PIPELINE_MODEL_PARALLEL_RANKS, \
+            "Current rank does not have a a previous pipeline model parallel rank"
+        return _PREV_PIPELINE_MODEL_PARALLEL_RANKS
+    else:
+        assert _PIPELINE_GLOBAL_RANKS is not None, \
+            "Pipeline parallel group is not initialized"
+        rank_in_pipeline = get_pipeline_model_parallel_rank()
+        world_size = get_pipeline_model_parallel_world_size()
+        return [_PIPELINE_GLOBAL_RANKS[(rank_in_pipeline - 1) % world_size]]
 
 
 def get_data_parallel_world_size():
@@ -1100,14 +1159,14 @@ def destroy_model_parallel():
     _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS = []
     global _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS
     _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS = []
-    global _PREV_PIPELINE_MODEL_PARALLEL_RANK
-    _PREV_PIPELINE_MODEL_PARALLEL_RANK = None
-    global _NEXT_PIPELINE_MODEL_PARALLEL_RANK
-    _NEXT_PIPELINE_MODEL_PARALLEL_RANK = None
-    global _FIRST_PIPELINE_MODEL_PARALLEL_RANK
-    _FIRST_PIPELINE_MODEL_PARALLEL_RANK = None
-    global _LAST_PIPELINE_MODEL_PARALLEL_RANK
-    _LAST_PIPELINE_MODEL_PARALLEL_RANK = None
+    global _PREV_PIPELINE_MODEL_PARALLEL_RANKS
+    _PREV_PIPELINE_MODEL_PARALLEL_RANKS = []
+    global _NEXT_PIPELINE_MODEL_PARALLEL_RANKS
+    _NEXT_PIPELINE_MODEL_PARALLEL_RANKS = []
+    global _FIRST_PIPELINE_MODEL_PARALLEL_RANKS
+    _FIRST_PIPELINE_MODEL_PARALLEL_RANKS = []
+    global _LAST_PIPELINE_MODEL_PARALLEL_RANKS
+    _LAST_PIPELINE_MODEL_PARALLEL_RANKS = []
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
