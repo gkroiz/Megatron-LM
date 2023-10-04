@@ -25,9 +25,9 @@ _DATA_PARALLEL_GROUP_GLOO = None
 # FP8 amax reduction group.
 _AMAX_REDUCTION_GROUP = None
 # Previous component pipeline group that the current rank belongs to.
-_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP = []
+_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
 # Next component pipeline group that the current rank belongs to.
-_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP = []
+_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
 
 # Previous pipeline model rank based on current rank.
 _PREV_PIPELINE_MODEL_PARALLEL_RANK = None
@@ -449,8 +449,8 @@ def initialize_model_components_parallel(
     global _NEXT_PIPELINE_MODEL_PARALLEL_RANK
     global _FIRST_PIPELINE_MODEL_PARALLEL_RANK
     global _LAST_PIPELINE_MODEL_PARALLEL_RANK
-    global _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP
-    global _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP
+    global _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS
+    global _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS
     global _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS
     global _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS
 
@@ -495,11 +495,11 @@ def initialize_model_components_parallel(
 
                     if rank in connector_ranks:
                         if rank == connector_ranks[0]:
-                            _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP.append(connector_group)
+                            _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS.append(connector_group)
                             _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS.append(connector_ranks)
 
                     if rank == connector_ranks[1]:
-                        _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP.append(connector_group)
+                        _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS.append(connector_group)
                         _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS.append(connector_ranks)
 
                 pipeline_model_parallel_ranks += pipeline_component_parallel_ranks
@@ -648,14 +648,31 @@ def get_pipeline_component_parallel_group(direction: Optional[str] = '', index: 
     if direction != '':
         assert direction in ['next', 'prev']
         if direction == 'next' and is_pipeline_component_last_stage():
-            assert len(_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP) != 0
-            return _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP[index]
+            assert len(_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS) != 0
+            return _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS[index]
         if direction == 'prev' and is_pipeline_component_first_stage():
-            assert len(_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP) != 0
-            return _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP[index]
+            assert len(_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS) != 0
+            return _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS[index]
     assert _PIPELINE_COMPONENT_PARALLEL_GROUP is not None, \
         'pipeline_model parallel group is not initialized'
     return _PIPELINE_COMPONENT_PARALLEL_GROUP
+
+
+def get_pipeline_component_parallel_groups(direction: Optional[str] = ''):
+    """Get all pipeline component parallel group the caller rank belongs to."""
+    """If direction is specific, get all next/prev component parallel connector group"""
+    if direction != '':
+        assert direction in ['next', 'prev']
+        if direction == 'next' and is_pipeline_component_last_stage():
+            assert len(_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS) != 0
+            return _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS
+        if direction == 'prev' and is_pipeline_component_first_stage():
+            assert len(_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS) != 0
+            return _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS
+    assert _PIPELINE_COMPONENT_PARALLEL_GROUP is not None, \
+        'pipeline_model parallel group is not initialized'
+    return _PIPELINE_COMPONENT_PARALLEL_GROUP
+
 
 def get_pipeline_component_parallel_group_ranks(direction: Optional[str] = '', index: int = 0):
     """Get the pipeline component parallel ranks (based on index input) the caller rank belongs to."""
@@ -663,11 +680,27 @@ def get_pipeline_component_parallel_group_ranks(direction: Optional[str] = '', i
     if direction != '':
         assert direction in ['next', 'prev']
         if direction == 'next' and is_pipeline_component_last_stage():
-            assert len(_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP) != 0
+            assert len(_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS) != 0
             return _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS[index]
         if direction == 'prev' and is_pipeline_component_first_stage():
-            assert len(_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP) != 0
+            assert len(_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS) != 0
             return _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS[index]
+    assert _PIPELINE_COMPONENT_PARALLEL_GROUP is not None, \
+        'pipeline_model parallel group is not initialized'
+    return _PIPELINE_COMPONENT_GLOBAL_RANKS
+
+
+def get_pipeline_component_parallel_groups_ranks(direction: Optional[str] = ''):
+    """Get all pipeline component parallel ranks the caller rank belongs to."""
+    """If direction is specific, get all next/prev component parallel connector ranks"""
+    if direction != '':
+        assert direction in ['next', 'prev']
+        if direction == 'next' and is_pipeline_component_last_stage():
+            assert len(_NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS) != 0
+            return _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS
+        if direction == 'prev' and is_pipeline_component_first_stage():
+            assert len(_PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS) != 0
+            return _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS
     assert _PIPELINE_COMPONENT_PARALLEL_GROUP is not None, \
         'pipeline_model parallel group is not initialized'
     return _PIPELINE_COMPONENT_GLOBAL_RANKS
@@ -1059,10 +1092,10 @@ def destroy_model_parallel():
     _POSITION_EMBEDDING_GROUP = None
     global _AMAX_REDUCTION_GROUP
     _AMAX_REDUCTION_GROUP = None
-    global _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP
-    _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUP = []
-    global _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP
-    _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUP = []
+    global _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS
+    _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
+    global _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS
+    _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS = []
     global _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS
     _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS = []
     global _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS
