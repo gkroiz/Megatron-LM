@@ -14,7 +14,7 @@ _PIPELINE_MODEL_PARALLEL_GROUPS = []
 # Inter-layer model component parallel group that the current rank belongs to.
 _PIPELINE_COMPONENT_PARALLEL_GROUP = None
 # Model parallel group (both intra- and pipeline) that the current rank belongs to.
-_MODEL_PARALLEL_GROUP = None
+_MODEL_PARALLEL_GROUP = []
 # Embedding group.
 _EMBEDDING_GROUP = None
 # Position embedding group.
@@ -205,13 +205,13 @@ def initialize_model_parallel(
 
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP
-    assert _MODEL_PARALLEL_GROUP is None, 'model parallel group is already initialized'
+    assert len(_MODEL_PARALLEL_GROUP) == 0, 'model parallel group is already initialized'
     for i in range(data_parallel_size):
         ranks = [data_parallel_group_ranks[i]
                  for data_parallel_group_ranks in all_data_parallel_group_ranks]
         group = torch.distributed.new_group(ranks)
         if rank in ranks:
-            _MODEL_PARALLEL_GROUP = group
+            _MODEL_PARALLEL_GROUP.append(group)
 
     # Build the tensor model-parallel groups.
     global _TENSOR_MODEL_PARALLEL_GROUP
@@ -398,7 +398,7 @@ def initialize_model_components_parallel(
 
     # Build the model-parallel groups.
     global _MODEL_PARALLEL_GROUP
-    assert _MODEL_PARALLEL_GROUP is None, 'model parallel group is already initialized'
+    assert len(_MODEL_PARALLEL_GROUP) == 0, 'model parallel group is already initialized'
 
     # assert that number of data parallel groups 
     assert data_parallel_group_sizes[first_component_name] == data_parallel_group_sizes[last_component_name]
@@ -426,7 +426,7 @@ def initialize_model_components_parallel(
                     ranks.append(data_parallel_group_ranks[i])
         group = torch.distributed.new_group(ranks)
         if rank in ranks:
-            _MODEL_PARALLEL_GROUP = group
+            _MODEL_PARALLEL_GROUP.append(group)
 
     # Build the tensor model-parallel groups.
     global _TENSOR_MODEL_PARALLEL_GROUP
@@ -605,9 +605,17 @@ def get_using_layer_unit_test_strategy():
     return _USING_LAYER_UNIT_TEST_STRATEGY
 
 
-def get_model_parallel_group():
+def get_model_parallel_group(index=0):
     """Get the model parallel group the caller rank belongs to."""
-    assert _MODEL_PARALLEL_GROUP is not None, \
+    """Specify index if there are multiple model parallel groups."""
+    assert len(_MODEL_PARALLEL_GROUP) != 0, \
+        'model parallel group is not initialized'
+    return _MODEL_PARALLEL_GROUP[index]
+
+
+def get_model_parallel_groups():
+    """Get all model parallel groups the caller rank belongs to."""
+    assert len(_MODEL_PARALLEL_GROUP) != 0, \
         'model parallel group is not initialized'
     return _MODEL_PARALLEL_GROUP
 
@@ -1036,7 +1044,7 @@ def get_global_memory_buffer():
 def destroy_model_parallel():
     """Set the groups to none."""
     global _MODEL_PARALLEL_GROUP
-    _MODEL_PARALLEL_GROUP = None
+    _MODEL_PARALLEL_GROUP = []
     global _TENSOR_MODEL_PARALLEL_GROUP
     _TENSOR_MODEL_PARALLEL_GROUP = None
     global _PIPELINE_COMPONENT_PARALLEL_GROUP
