@@ -81,6 +81,9 @@ _NUM_COMPONENT_LAYERS = None
 # whether layer unit test strategy is used (boolean)
 _USING_LAYER_UNIT_TEST_STRATEGY = None
 
+# ratio for fan-in fan-out (assuming stimulus and response components have same number of data parallel groups)
+_FIFO_RATIO = None
+
 def initialize_model_parallel(
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
@@ -413,6 +416,9 @@ def initialize_model_components_parallel(
     assert data_parallel_group_sizes[first_component_name] % data_parallel_group_sizes[middle_component_name] == 0
     ratio = data_parallel_group_sizes[first_component_name] // data_parallel_group_sizes[middle_component_name]
 
+    global _FIFO_RATIO
+    _FIFO_RATIO = ratio
+
     # for each different data parallel group in the first component,
     # define a model-parallel group
     for i in range(data_parallel_group_sizes[first_component_name]):
@@ -603,6 +609,12 @@ def get_using_layer_unit_test_strategy():
     assert _USING_LAYER_UNIT_TEST_STRATEGY is not None, \
         'parallel state not intialized'
     return _USING_LAYER_UNIT_TEST_STRATEGY
+
+
+def get_fifo_ratio():
+    assert _FIFO_RATIO is not None, \
+        'first-in first-out ratio is not defined'
+    return _FIFO_RATIO
 
 
 def get_model_parallel_group(index=0):
@@ -1189,3 +1201,5 @@ def destroy_model_parallel():
     _NUM_COMPONENT_LAYERS = None
     global _USING_LAYER_UNIT_TEST_STRATEGY
     _USING_LAYER_UNIT_TEST_STRATEGY = None
+    global _FIFO_RATIO
+    _FIFO_RATIO = None
