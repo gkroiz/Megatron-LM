@@ -479,8 +479,10 @@ def forward_backward_pipelining_with_interleaving(*,
     synchronized_model_chunks = set()
 
     # define the number of pipeline model paralle groups to track
-    # when there is fan-in or fan-out, this will not equal 1
-    if parallel_state.is_rank_in_first_component() or parallel_state.is_rank_in_last_component():
+    # when using LUTS with fan-in or fan-out, this will not equal 1
+    if not parallel_state.get_using_layer_unit_test_strategy():
+        num_pipeline_model_parallel_groups_to_track = 1
+    elif parallel_state.is_rank_in_first_component() or parallel_state.is_rank_in_last_component():
         num_pipeline_model_parallel_groups_to_track = 1
     else:
         num_pipeline_model_parallel_groups_to_track = parallel_state.get_fifo_ratio()
