@@ -157,7 +157,8 @@ def _batched_p2p_ops_w_components(*,
                      tensor_send_next: Optional[torch.Tensor],
                      tensor_recv_next: Optional[torch.Tensor],
                      prev_group: torch.distributed.ProcessGroup,
-                     next_group: torch.distributed.ProcessGroup):
+                     next_group: torch.distributed.ProcessGroup,
+                     component_connector_group_index: int = 0):
     # print(f"Using batched p2pOps with components. send_prev: {tensor_send_prev is not None}, recv_prec: {tensor_recv_prev is not None}, send_next: {tensor_send_next is not None}, recv_next: {tensor_recv_next is not None}")
     ops = []
     if tensor_send_prev is not None:
@@ -272,7 +273,8 @@ def _p2p_ops_w_components(*,
              tensor_send_next: Optional[torch.Tensor],
              tensor_recv_next: Optional[torch.Tensor],
              prev_group: torch.distributed.ProcessGroup = None,
-             next_group: torch.distributed.ProcessGroup = None):
+             next_group: torch.distributed.ProcessGroup = None,
+             component_connector_group_index: int = 0):
     # print("Using p2pOps with components")
     reqs = []
     rank = get_pipeline_component_parallel_rank()
@@ -280,7 +282,7 @@ def _p2p_ops_w_components(*,
         if tensor_send_next is not None:
             send_next_req = torch.distributed.isend(
                 tensor=tensor_send_next,
-                dst=get_pipeline_model_parallel_next_rank(),
+                dst=get_pipeline_model_parallel_next_rank(component_connector_group_index),
                 group=next_group,
             )
             reqs.append(send_next_req)
@@ -288,7 +290,7 @@ def _p2p_ops_w_components(*,
         if tensor_recv_prev is not None:
             recv_prev_req = torch.distributed.irecv(
                 tensor=tensor_recv_prev,
-                src=get_pipeline_model_parallel_prev_rank(),
+                src=get_pipeline_model_parallel_prev_rank(component_connector_group_index),
                 group=prev_group,
             )
             reqs.append(recv_prev_req)
@@ -296,7 +298,7 @@ def _p2p_ops_w_components(*,
         if tensor_send_prev is not None:
             send_prev_req = torch.distributed.isend(
                 tensor=tensor_send_prev,
-                dst=get_pipeline_model_parallel_prev_rank(),
+                dst=get_pipeline_model_parallel_prev_rank(component_connector_group_index),
                 group=prev_group,
             )
             reqs.append(send_prev_req)
@@ -304,7 +306,7 @@ def _p2p_ops_w_components(*,
         if tensor_recv_next is not None:
             recv_next_req = torch.distributed.irecv(
                 tensor=tensor_recv_next,
-                src=get_pipeline_model_parallel_next_rank(),
+                src=get_pipeline_model_parallel_next_rank(component_connector_group_index),
                 group=next_group,
             )
             reqs.append(recv_next_req)
@@ -313,7 +315,7 @@ def _p2p_ops_w_components(*,
         if tensor_recv_prev is not None:
             recv_prev_req = torch.distributed.irecv(
                 tensor=tensor_recv_prev,
-                src=get_pipeline_model_parallel_prev_rank(),
+                src=get_pipeline_model_parallel_prev_rank(component_connector_group_index),
                 group=prev_group,
             )
             reqs.append(recv_prev_req)
@@ -321,7 +323,7 @@ def _p2p_ops_w_components(*,
         if tensor_send_next is not None:
             send_next_req = torch.distributed.isend(
                 tensor=tensor_send_next,
-                dst=get_pipeline_model_parallel_next_rank(),
+                dst=get_pipeline_model_parallel_next_rank(component_connector_group_index),
                 group=next_group,
             )
             reqs.append(send_next_req)
@@ -329,7 +331,7 @@ def _p2p_ops_w_components(*,
         if tensor_recv_next is not None:
             recv_next_req = torch.distributed.irecv(
                 tensor=tensor_recv_next,
-                src=get_pipeline_model_parallel_next_rank(),
+                src=get_pipeline_model_parallel_next_rank(component_connector_group_index),
                 group=next_group,
             )
             reqs.append(recv_next_req)
@@ -337,7 +339,7 @@ def _p2p_ops_w_components(*,
         if tensor_send_prev is not None:
             send_prev_req = torch.distributed.isend(
                 tensor=tensor_send_prev,
-                dst=get_pipeline_model_parallel_prev_rank(),
+                dst=get_pipeline_model_parallel_prev_rank(component_connector_group_index),
                 group=prev_group,
             )
             reqs.append(send_prev_req)
@@ -353,6 +355,7 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
                  dtype: Optional[torch.dtype],
                  variable_seq_lengths: bool = False,
                  use_ring_exchange_p2p: bool = False,
+                 component_connector_group_index: int = 0,
                  ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Communicate tensors between stages. Used as helper method in other
     communication methods that are used in megatron/schedules.py.
@@ -468,16 +471,17 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
     if get_using_layer_unit_test_strategy():
         prev_group, next_group = None, None
         if (tensor_recv_prev is not None) or (tensor_send_prev is not None):
-            prev_group = get_pipeline_component_parallel_group('prev')
+            prev_group = get_pipeline_component_parallel_group('prev', component_connector_group_index)
         if (tensor_recv_next is not None) or (tensor_send_next is not None):
-            next_group = get_pipeline_component_parallel_group('next')
+            next_group = get_pipeline_component_parallel_group('next', component_connector_group_index)
 
         reqs = p2p_func(tensor_send_prev=tensor_send_prev,
                     tensor_recv_prev=tensor_recv_prev,
                     tensor_send_next=tensor_send_next,
                     tensor_recv_next=tensor_recv_next,
                     prev_group=prev_group,
-                    next_group=next_group)
+                    next_group=next_group,
+                    component_connector_group_index=component_connector_group_index)
     else:
         reqs = p2p_func(tensor_send_prev=tensor_send_prev,
                         tensor_recv_prev=tensor_recv_prev,
@@ -502,7 +506,8 @@ def _communicate(*, tensor_send_next: Optional[torch.Tensor],
 def recv_forward(tensor_shape: Shape,
                  dtype: torch.dtype,
                  batch_p2p_comm: bool = True,
-                 timers: Callable = None) -> torch.Tensor:
+                 timers: Callable = None,
+                 component_connector_group_index: int = 0) -> torch.Tensor:
     """ Receive tensor from previous rank in pipeline (forward receive).
 
 
@@ -521,7 +526,8 @@ def recv_forward(tensor_shape: Shape,
             recv_next=False,
             tensor_shape=tensor_shape,
             batch_p2p_comm=batch_p2p_comm,
-            dtype=dtype)
+            dtype=dtype,
+            component_connector_group_index=component_connector_group_index)
         if timers is not None:
             timers('forward-recv').stop()
     return input_tensor
@@ -531,7 +537,8 @@ def recv_forward(tensor_shape: Shape,
 def recv_backward(tensor_shape: Shape,
                   dtype: torch.dtype,
                   batch_p2p_comm: bool = True,
-                  timers: Callable = None) -> torch.Tensor:
+                  timers: Callable = None,
+                  component_connector_group_index: int = 0) -> torch.Tensor:
     """Receive tensor from next rank in pipeline (backward receive).
 
     See _communicate for argument details.
@@ -548,7 +555,8 @@ def recv_backward(tensor_shape: Shape,
             recv_next=True,
             tensor_shape=tensor_shape,
             batch_p2p_comm=batch_p2p_comm,
-            dtype=dtype)
+            dtype=dtype,
+            component_connector_group_index=component_connector_group_index)
         if timers is not None:
             timers('backward-recv').stop()
     return output_tensor_grad
@@ -557,7 +565,8 @@ def recv_backward(tensor_shape: Shape,
 @nvtx.annotate(color="blue", category="p2p_op")
 def send_forward(output_tensor: torch.Tensor,
                  batch_p2p_comm: bool = True,
-                 timers: Callable = None) -> None:
+                 timers: Callable = None,
+                 component_connector_group_index: int = 0) -> None:
     """Send tensor to next rank in pipeline (forward send).
 
     See _communicate for argument details.
@@ -574,7 +583,8 @@ def send_forward(output_tensor: torch.Tensor,
             recv_next=False,
             tensor_shape=None,
             batch_p2p_comm=batch_p2p_comm,
-            dtype=None)
+            dtype=None,
+            component_connector_group_index=component_connector_group_index)
         nvtx.end_range(rng)
         if timers is not None:
             timers('forward-send').stop()
@@ -583,7 +593,8 @@ def send_forward(output_tensor: torch.Tensor,
 @nvtx.annotate(color="blue", category="p2p_op")
 def send_backward(input_tensor_grad: torch.Tensor,
                   batch_p2p_comm: bool = True,
-                  timers: Callable = None) -> None:
+                  timers: Callable = None,
+                  component_connector_group_index: int = 0) -> None:
     """Send tensor to previous rank in pipeline (backward send).
 
     See _communicate for argument details.
@@ -598,7 +609,8 @@ def send_backward(input_tensor_grad: torch.Tensor,
             recv_next=False,
             tensor_shape=None,
             batch_p2p_comm=batch_p2p_comm,
-            dtype=None)
+            dtype=None,
+            component_connector_group_index=component_connector_group_index)
         if timers is not None:
             timers('backward-send').stop()
 
@@ -608,7 +620,8 @@ def send_forward_recv_backward(output_tensor: torch.Tensor,
                                tensor_shape: Shape,
                                dtype: torch.dtype,
                                batch_p2p_comm: bool = True,
-                               timers: Callable = None) -> torch.Tensor:
+                              timers: Callable = None,
+                              component_connector_group_index: int = 0) -> torch.Tensor:
     """Batched send and recv with next rank in pipeline.
 
     See _communicate for argument details.
@@ -625,7 +638,8 @@ def send_forward_recv_backward(output_tensor: torch.Tensor,
             recv_next=True,
             tensor_shape=tensor_shape,
             batch_p2p_comm=batch_p2p_comm,
-            dtype=dtype)
+            dtype=dtype,
+            component_connector_group_index=component_connector_group_index)
         if timers is not None:
             timers('forward-send-backward-recv').stop()
     return output_tensor_grad
@@ -636,7 +650,8 @@ def send_backward_recv_forward(input_tensor_grad: torch.Tensor,
                                tensor_shape: Shape,
                                dtype: torch.dtype,
                                batch_p2p_comm: bool = True,
-                               timers: Callable = None) -> torch.Tensor:
+                              timers: Callable = None,
+                              component_connector_group_index: int = 0) -> torch.Tensor:
     """Batched send and recv with previous rank in pipeline.
 
     See _communicate for argument details.
@@ -653,7 +668,8 @@ def send_backward_recv_forward(input_tensor_grad: torch.Tensor,
             recv_next=False,
             tensor_shape=tensor_shape,
             batch_p2p_comm=batch_p2p_comm,
-            dtype=dtype)
+            dtype=dtype,
+            component_connector_group_index=component_connector_group_index)
         if timers is not None:
             timers('backward-send-forward-recv').stop()
     return input_tensor
@@ -666,7 +682,8 @@ def send_forward_recv_forward(output_tensor: torch.Tensor,
                               dtype: torch.dtype,
                               batch_p2p_comm: bool = True,
                               overlap_p2p_comm: bool = False,
-                              timers: Callable = None) -> torch.Tensor:
+                              timers: Callable = None,
+                              component_connector_group_index: int = 0) -> torch.Tensor:
     """Batched recv from previous rank and send to next rank in pipeline.
 
     See _communicate for argument details.
@@ -681,7 +698,8 @@ def send_forward_recv_forward(output_tensor: torch.Tensor,
         tensor_shape=tensor_shape,
         batch_p2p_comm=batch_p2p_comm,
         wait_on_reqs=(not overlap_p2p_comm),
-        dtype=dtype)
+        dtype=dtype,
+        component_connector_group_index=component_connector_group_index)
     if timers is not None:
         timers('forward-send-forward-recv').stop()
     if overlap_p2p_comm:
@@ -696,7 +714,8 @@ def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
                                 dtype: torch.dtype,
                                 batch_p2p_comm: bool = True,
                                 overlap_p2p_comm: bool = False,
-                                timers: Callable = None) -> torch.Tensor:
+                              timers: Callable = None,
+                              component_connector_group_index: int = 0) -> torch.Tensor:
     """Batched recv from next rank and send to previous rank in pipeline.
 
     See _communicate for argument details.
@@ -711,7 +730,8 @@ def send_backward_recv_backward(input_tensor_grad: torch.Tensor,
         tensor_shape=tensor_shape,
         batch_p2p_comm=batch_p2p_comm,
         wait_on_reqs=(not overlap_p2p_comm),
-        dtype=dtype)
+        dtype=dtype,
+        component_connector_group_index=component_connector_group_index)
     if timers is not None:
         timers('backward-send-backward-recv').stop()
     if overlap_p2p_comm:
@@ -728,7 +748,8 @@ def send_forward_backward_recv_forward_backward(
         tensor_shape: Shape,
         dtype: torch.dtype,
         batch_p2p_comm: bool = True,
-        timers: Callable = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        timers: Callable = None,
+        component_connector_group_index: int = 0) -> Tuple[torch.Tensor, torch.Tensor]:
     """Batched send and recv with previous and next ranks in pipeline.
 
     See _communicate for argument details.
@@ -743,7 +764,8 @@ def send_forward_backward_recv_forward_backward(
         recv_next=recv_next,
         tensor_shape=tensor_shape,
         batch_p2p_comm=batch_p2p_comm,
-        dtype=dtype)
+        dtype=dtype,
+        component_connector_group_index=component_connector_group_index)
     if timers is not None:
         timers('forward-backward-send-forward-backward-recv').stop()
     return input_tensor, output_tensor_grad
