@@ -689,8 +689,8 @@ def forward_backward_pipelining_with_interleaving(*,
         if num_pipeline_model_parallel_groups_to_track != 1:
             _COMPONENT_CONNECTOR_GROUP_INDEX = (_COMPONENT_CONNECTOR_GROUP_INDEX + 1) % num_pipeline_model_parallel_groups_to_track
 
-    fwd_wait_handles = None
-    bwd_wait_handles = None
+    fwd_wait_handles = [None] * num_pipeline_model_parallel_groups_to_track
+    bwd_wait_handles = [None] * num_pipeline_model_parallel_groups_to_track
 
     for k in range(num_warmup_microbatches):
         # iterate through each num_pipeline_model_parallel_groups_to_track*2
@@ -699,12 +699,12 @@ def forward_backward_pipelining_with_interleaving(*,
         for pipeline_model_parallel_group_tracker in range(num_pipeline_model_parallel_groups_to_track*2):
 
             if pipeline_model_parallel_group_tracker <= num_pipeline_model_parallel_groups_to_track:
-                if fwd_wait_handles is not None:
-                    for req in fwd_wait_handles:
+                if fwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX] is not None:
+                    for req in fwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX]:
                         req.wait()
             else:
-                if bwd_wait_handles is not None:
-                    for req in bwd_wait_handles:
+                if bwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX] is not None:
+                    for req in bwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX]:
                         req.wait()
             if pipeline_model_parallel_group_tracker < num_pipeline_model_parallel_groups_to_track:
                 output_tensor = forward_step_helper(k)
@@ -751,7 +751,7 @@ def forward_backward_pipelining_with_interleaving(*,
                 input_tensors[_COMPONENT_CONNECTOR_GROUP_INDEX][next_forward_model_chunk_id].append(input_tensor)
             else:
                     if pipeline_model_parallel_group_tracker < num_pipeline_model_parallel_groups_to_track:
-                        input_tensor, fwd_wait_handles = \
+                        input_tensor, fwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX] = \
                             p2p_communication.send_forward_recv_forward(
                                 output_tensor, recv_prev=recv_prev,
                                 tensor_shape=tensor_shape,
@@ -771,7 +771,7 @@ def forward_backward_pipelining_with_interleaving(*,
                             if parallel_state.is_pipeline_last_stage(ignore_virtual=True):
                                 recv_next = False
 
-                            output_tensor_grad, bwd_wait_handles = p2p_communication.send_backward_recv_backward(
+                            output_tensor_grad, bwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX] = p2p_communication.send_backward_recv_backward(
                                 input_tensor_grad, recv_next=recv_next,
                                 tensor_shape=tensor_shape,
                                 batch_p2p_comm=batch_p2p_comm,
@@ -801,8 +801,8 @@ def forward_backward_pipelining_with_interleaving(*,
 
             # iterate through each num_pipeline_model_parallel_groups_to_track
             for _ in range(num_pipeline_model_parallel_groups_to_track):
-                if fwd_wait_handles is not None:
-                    for req in fwd_wait_handles:
+                if fwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX] is not None:
+                    for req in fwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX]:
                         req.wait()
 
                 deallocate_output_tensor(output_tensor, deallocate_pipeline_outputs)
@@ -839,7 +839,7 @@ def forward_backward_pipelining_with_interleaving(*,
 
                 # Send activation tensor to the next stage and receive activation tensor from the
                 # previous stage
-                input_tensor, fwd_wait_handles = \
+                input_tensor, fwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX] = \
                     p2p_communication.send_forward_recv_forward(
                         output_tensor, recv_prev=recv_prev,
                         tensor_shape=tensor_shape,
@@ -859,8 +859,8 @@ def forward_backward_pipelining_with_interleaving(*,
 
             # iterate through each num_pipeline_model_parallel_groups_to_track
             for _ in range(num_pipeline_model_parallel_groups_to_track):
-                if bwd_wait_handles is not None:
-                    for req in bwd_wait_handles:
+                if bwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX] is not None:
+                    for req in bwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX]:
                         req.wait()
 
                 # Backward pass.
@@ -889,7 +889,7 @@ def forward_backward_pipelining_with_interleaving(*,
                         backward_k + 1, forward=False
                     )
 
-                output_tensor_grad, bwd_wait_handles = p2p_communication.send_backward_recv_backward(
+                output_tensor_grad, bwd_wait_handles[_COMPONENT_CONNECTOR_GROUP_INDEX] = p2p_communication.send_backward_recv_backward(
                     input_tensor_grad, recv_next=recv_next,
                     tensor_shape=tensor_shape,
                     dtype=dtype,
@@ -985,9 +985,10 @@ def forward_backward_pipelining_with_interleaving(*,
 
     # Run cooldown backward passes (flush out pipeline).
     if not forward_only:
-        if overlap_p2p_comm and bwd_wait_handles is not None:
-            for wait_handle in bwd_wait_handles:
-                wait_handle.wait()
+        for component_connector_group_index in range(num_pipeline_model_parallel_groups_to_track):
+            if overlap_p2p_comm and bwd_wait_handles[component_connector_group_index] is not None:
+                for wait_handle in bwd_wait_handles[component_connector_group_index]:
+                    wait_handle.wait()
 
         if all_warmup_microbatches:
             # precaution to make sure _COMPONENT_CONNECTOR_GROUP_INDEX value is not off set
