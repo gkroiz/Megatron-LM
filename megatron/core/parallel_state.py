@@ -455,6 +455,7 @@ def initialize_model_components_parallel(
                           all_gpu_ranks[k][((i + 1) * tensor_model_parallel_group_sizes[k])-1]+1)
             group = torch.distributed.new_group(ranks)
             if rank in ranks:
+                print(f"rank {rank}, _TENSOR_MODEL_PARALLEL_GROUP: {ranks}", flush=True)
                 _TENSOR_MODEL_PARALLEL_GROUP = group
 
     # Build the pipeline model-parallel and component pipeline connector groups
@@ -504,6 +505,7 @@ def initialize_model_components_parallel(
                 if rank in pipeline_component_parallel_ranks:
                     _PIPELINE_COMPONENT_PARALLEL_GROUP = pipeline_component_parallel_group
                     _PIPELINE_COMPONENT_GLOBAL_RANKS = pipeline_component_parallel_ranks
+                    print(f'rank {rank} | _PIPELINE_COMPONENT_PARALLEL_GROUP: {pipeline_component_parallel_ranks}')
 
                 # define connector ranks
                 if len(pipeline_model_parallel_ranks) != 0:
@@ -512,10 +514,12 @@ def initialize_model_components_parallel(
 
                     if rank in connector_ranks:
                         if rank == connector_ranks[0]:
+                            print(f'rank {rank} | _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS: {connector_ranks}')
                             _NEXT_COMPONENT_PIPELINE_CONNECTOR_GROUPS.append(connector_group)
                             _NEXT_COMPONENT_PIPELINE_GLOBAL_RANKS.append(connector_ranks)
 
                     if rank == connector_ranks[1]:
+                        print(f'rank {rank} | _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS: {connector_ranks}')
                         _PREV_COMPONENT_PIPELINE_CONNECTOR_GROUPS.append(connector_group)
                         _PREV_COMPONENT_PIPELINE_GLOBAL_RANKS.append(connector_ranks)
 
@@ -524,6 +528,7 @@ def initialize_model_components_parallel(
             # define pipeline model parallel group + other related global variables
             pipeline_model_parallel_group = torch.distributed.new_group(pipeline_model_parallel_ranks)
             if rank in pipeline_model_parallel_ranks:
+                print(f'rank {rank} | _PIPELINE_MODEL_PARALLEL_GROUPS: {pipeline_model_parallel_ranks}')
                 _PIPELINE_MODEL_PARALLEL_GROUPS.append(pipeline_model_parallel_group)
                 _PIPELINE_GLOBAL_RANKS.append(pipeline_model_parallel_ranks)
 
@@ -566,7 +571,7 @@ def initialize_model_components_parallel(
         else:
             embedding_ranks = ranks
             position_embedding_ranks = ranks
-
+        print(f'rank {rank} | _EMBEDDING_GROUP: {embedding_ranks}', flush=True)
         group = torch.distributed.new_group(embedding_ranks)
         if rank in embedding_ranks:
             _EMBEDDING_GROUP = group

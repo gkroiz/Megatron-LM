@@ -278,8 +278,10 @@ def _p2p_ops_w_components(*,
     # print("Using p2pOps with components")
     reqs = []
     rank = get_pipeline_component_parallel_rank()
+    global_rank = torch.distributed.get_rank()
     if get_pipeline_component_parallel_rank() % 2 == 0:
         if tensor_send_next is not None:
+            print(f'rank {global_rank} | send to {get_pipeline_model_parallel_next_rank(component_connector_group_index)}', flush=True)
             send_next_req = torch.distributed.isend(
                 tensor=tensor_send_next,
                 dst=get_pipeline_model_parallel_next_rank(component_connector_group_index),
@@ -288,6 +290,7 @@ def _p2p_ops_w_components(*,
             reqs.append(send_next_req)
 
         if tensor_recv_prev is not None:
+            print(f'rank {global_rank} | recv from {get_pipeline_model_parallel_prev_rank(component_connector_group_index)}', flush=True)
             recv_prev_req = torch.distributed.irecv(
                 tensor=tensor_recv_prev,
                 src=get_pipeline_model_parallel_prev_rank(component_connector_group_index),
@@ -296,6 +299,7 @@ def _p2p_ops_w_components(*,
             reqs.append(recv_prev_req)
 
         if tensor_send_prev is not None:
+            print(f'rank {global_rank} | send to {get_pipeline_model_parallel_prev_rank(component_connector_group_index)}', flush=True)
             send_prev_req = torch.distributed.isend(
                 tensor=tensor_send_prev,
                 dst=get_pipeline_model_parallel_prev_rank(component_connector_group_index),
@@ -304,6 +308,7 @@ def _p2p_ops_w_components(*,
             reqs.append(send_prev_req)
 
         if tensor_recv_next is not None:
+            print(f'rank {global_rank} | recv from {get_pipeline_model_parallel_next_rank(component_connector_group_index)}', flush=True)
             recv_next_req = torch.distributed.irecv(
                 tensor=tensor_recv_next,
                 src=get_pipeline_model_parallel_next_rank(component_connector_group_index),
