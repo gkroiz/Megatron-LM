@@ -395,10 +395,10 @@ def initialize_model_components_parallel(
                 ranks = range(all_gpu_ranks[k][start_rank + j], all_gpu_ranks[k][end_rank-1]+1, tensor_model_parallel_group_sizes[k])
                 all_data_parallel_group_ranks[k].append(list(ranks))
                 group = torch.distributed.new_group(ranks)
-                group_gloo = torch.distributed.new_group(ranks, backend="gloo")
+                # group_gloo = torch.distributed.new_group(ranks, backend="gloo")
                 if rank in ranks:
                     _DATA_PARALLEL_GROUP = group
-                    _DATA_PARALLEL_GROUP_GLOO = group_gloo
+                    # _DATA_PARALLEL_GROUP_GLOO = group_gloo
                     _DATA_PARALLEL_GLOBAL_RANKS = ranks
 
     first_component_name, middle_component_name, last_component_name = tuple(parallelization_specs.keys())
