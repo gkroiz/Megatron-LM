@@ -395,10 +395,11 @@ def initialize_model_components_parallel(
                 ranks = range(all_gpu_ranks[k][start_rank + j], all_gpu_ranks[k][end_rank-1]+1, tensor_model_parallel_group_sizes[k])
                 all_data_parallel_group_ranks[k].append(list(ranks))
                 group = torch.distributed.new_group(ranks)
-                group_gloo = torch.distributed.new_group(ranks, backend="gloo")
+                # group_gloo = torch.distributed.new_group(ranks, backend="gloo")
                 if rank in ranks:
+                    print(f'rank {rank} | _DATA_PARALLEL_GROUP: ', ranks, flush=True)
                     _DATA_PARALLEL_GROUP = group
-                    _DATA_PARALLEL_GROUP_GLOO = group_gloo
+                    # _DATA_PARALLEL_GROUP_GLOO = group_gloo
                     _DATA_PARALLEL_GLOBAL_RANKS = ranks
 
     first_component_name, middle_component_name, last_component_name = tuple(parallelization_specs.keys())
@@ -443,6 +444,7 @@ def initialize_model_components_parallel(
                     ranks.append(data_parallel_group_ranks[i])
         group = torch.distributed.new_group(ranks)
         if rank in ranks:
+            print(f'rank {rank} | _MODEL_PARALLEL_GROUP: ', ranks, flush=True)
             _MODEL_PARALLEL_GROUP.append(group)
 
     # Build the tensor model-parallel groups.
@@ -745,6 +747,8 @@ def get_data_parallel_group_gloo():
     """Get the data parallel group-gloo the caller rank belongs to."""
     assert _DATA_PARALLEL_GROUP_GLOO is not None, \
         'data parallel group-gloo is not initialized'
+    rank = torch.distributed.get_rank()
+    print(f'rank {rank}  in get_data_parallel_group_gloo')
     return _DATA_PARALLEL_GROUP_GLOO
 
 

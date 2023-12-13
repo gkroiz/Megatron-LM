@@ -490,6 +490,8 @@ def forward_backward_pipelining_with_interleaving(*,
     if num_pipeline_model_parallel_groups_to_track != 1 and batch_p2p_comm:
         raise ValueError("batch_p2p_comm is not implemented for non-uniform data parallelism. Please switch to overlap_p2p_comm")
 
+    print('in schedules.py num_pipeline_model_parallel_groups_to_track: ', num_pipeline_model_parallel_groups_to_track, flush=True)
+
     # define input_tensors, output_tensors, and output_tensor_grades based on num_pipeline_model_parallel_groups_to_track
     input_tensors = [[[] for _ in range(len(model))] for _ in range(num_pipeline_model_parallel_groups_to_track)]
     output_tensors = [[[] for _ in range(len(model))] for _ in range(num_pipeline_model_parallel_groups_to_track)]
@@ -692,8 +694,11 @@ def forward_backward_pipelining_with_interleaving(*,
     fwd_wait_handles = [None] * num_pipeline_model_parallel_groups_to_track
     bwd_wait_handles = [None] * num_pipeline_model_parallel_groups_to_track
 
+    global_rank = torch.distributed.get_rank()
+
     warmup_rng = nvtx.start_range(message="fwd_pass_warmup", color="green")
     for k in range(num_warmup_microbatches):
+        print(f'rank {global_rank} | in schedules.py warmup step {k}/{num_warmup_microbatches}', flush=True)
         # iterate through each num_pipeline_model_parallel_groups_to_track*2
         # loop is multiplied by two since the first half of loop iterations will only run forward pass
         # and the second half will only run backward pass (which only happens during the last warmup step)
@@ -795,6 +800,7 @@ def forward_backward_pipelining_with_interleaving(*,
     # Run 1F1B in steady state.
     steady_state_rng = nvtx.start_range(message="fwd_pass_steady_state", color="darkgreen")
     for k in range(num_microbatches_remaining):
+        print(f'rank {global_rank} | in schedules.py steady state step {k}/{num_microbatches_remaining}', flush=True)
         # Forward pass.
         forward_k = k + num_warmup_microbatches
 
@@ -1010,6 +1016,7 @@ def forward_backward_pipelining_with_interleaving(*,
                     _COMPONENT_CONNECTOR_GROUP_INDEX = (_COMPONENT_CONNECTOR_GROUP_INDEX + 1) % num_pipeline_model_parallel_groups_to_track
     
         for k in range(num_microbatches_remaining, total_num_microbatches):
+            print(f'rank {global_rank} | in schedules.py steady state step {k}/{total_num_microbatches-num_microbatches_remaining}', flush=True)
             # precaution to make sure _COMPONENT_CONNECTOR_GROUP_INDEX value is not off set
             assert _COMPONENT_CONNECTOR_GROUP_INDEX == 0
 
@@ -1045,7 +1052,7 @@ def forward_backward_pipelining_with_interleaving(*,
                 synchronized_model_chunks.add(model_chunk_id)
         if params:
             grad_sync_func(params)
-
+    print(f'rank {global_rank} | in schedules.py leaving training step', flush=True)
     return forward_data_store
 
 def get_tensor_shapes(*,
