@@ -394,6 +394,7 @@ def initialize_model_components_parallel(
             for j in range(tensor_model_parallel_group_sizes[k]):
                 ranks = range(all_gpu_ranks[k][start_rank + j], all_gpu_ranks[k][end_rank-1]+1, tensor_model_parallel_group_sizes[k])
                 all_data_parallel_group_ranks[k].append(list(ranks))
+                print(f'in parallel_state.py, rank {rank}, ranks: {ranks}', flush=True)
                 group = torch.distributed.new_group(ranks)
                 group_gloo = torch.distributed.new_group(ranks, backend="gloo")
                 if rank in ranks:
