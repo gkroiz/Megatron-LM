@@ -486,7 +486,7 @@ def forward_backward_pipelining_with_interleaving(*,
         num_pipeline_model_parallel_groups_to_track = 1
     else:
         num_pipeline_model_parallel_groups_to_track = parallel_state.get_fifo_ratio()
-        
+
     if num_pipeline_model_parallel_groups_to_track != 1 and batch_p2p_comm:
         raise ValueError("batch_p2p_comm is not implemented for non-uniform data parallelism. Please switch to overlap_p2p_comm")
 
@@ -761,7 +761,7 @@ def forward_backward_pipelining_with_interleaving(*,
                                 timers=timers,
                                 overlap_p2p_comm=True,
                                 component_connector_group_index=_COMPONENT_CONNECTOR_GROUP_INDEX)
-                        
+
                         input_tensors[_COMPONENT_CONNECTOR_GROUP_INDEX][next_forward_model_chunk_id].append(input_tensor)
 
                     else:
@@ -782,7 +782,7 @@ def forward_backward_pipelining_with_interleaving(*,
                                 component_connector_group_index=_COMPONENT_CONNECTOR_GROUP_INDEX)
 
                             output_tensor_grads[_COMPONENT_CONNECTOR_GROUP_INDEX][num_model_chunks-1].append(output_tensor_grad)
-                    
+
             if num_pipeline_model_parallel_groups_to_track != 1:
                 _COMPONENT_CONNECTOR_GROUP_INDEX = (_COMPONENT_CONNECTOR_GROUP_INDEX + 1) % num_pipeline_model_parallel_groups_to_track
 
@@ -983,7 +983,7 @@ def forward_backward_pipelining_with_interleaving(*,
             if recv_next:
                 output_tensor_grads[_COMPONENT_CONNECTOR_GROUP_INDEX][next_backward_model_chunk_id].append(
                     output_tensor_grad)
-    
+
     deallocate_output_tensor(output_tensor, deallocate_pipeline_outputs)
 
     nvtx.end_range(steady_state_rng)
@@ -1008,7 +1008,7 @@ def forward_backward_pipelining_with_interleaving(*,
                                                     component_connector_group_index=_COMPONENT_CONNECTOR_GROUP_INDEX))
                 if num_pipeline_model_parallel_groups_to_track != 1:
                     _COMPONENT_CONNECTOR_GROUP_INDEX = (_COMPONENT_CONNECTOR_GROUP_INDEX + 1) % num_pipeline_model_parallel_groups_to_track
-    
+
         for k in range(num_microbatches_remaining, total_num_microbatches):
             # precaution to make sure _COMPONENT_CONNECTOR_GROUP_INDEX value is not off set
             assert _COMPONENT_CONNECTOR_GROUP_INDEX == 0
@@ -1197,7 +1197,7 @@ def forward_backward_pipelining_without_interleaving(*,
     if not batch_p2p_comm:
         raise ValueError("Non-interleaved pipeline parallelism only supports using batched p2p communication")
 
-    if parallel_state.get_fifo_ratio() != 1:
+    if parallel_state.get_using_layer_unit_test_strategy() and parallel_state.get_fifo_ratio() != 1:
         raise ValueError("batch_p2p_comm is not implemented for non-uniform data parallelism. Please switch to overlap_p2p_comm")
 
     # Disable async grad reductions
