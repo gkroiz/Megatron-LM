@@ -5,23 +5,25 @@
 import torch
 import torch.nn.functional as F
 from functools import partial
-from megatron import get_args, get_timers, print_rank_0
+from megatron.training import get_args, get_timers, print_rank_0
 from megatron.core.enums import ModelType
-from megatron.data.vit_dataset import build_train_valid_datasets
-from megatron.model.vision.classification import VitClassificationModel
-from megatron.model.vision.classification import MitClassificationModel
+from megatron.legacy.data.vit_dataset import build_train_valid_datasets
+from megatron.legacy.model.vision.classification import VitClassificationModel
+from megatron.legacy.model.vision.classification import MitClassificationModel
 from megatron.training import pretrain
-from megatron.utils import average_losses_across_data_parallel_group
+from megatron.training.utils import average_losses_across_data_parallel_group
+from megatron.training.arguments import core_transformer_config_from_args
 
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
 
     args = get_args()
-
+    config = core_transformer_config_from_args(args)
     if args.vision_backbone_type == 'vit':
         print_rank_0("building VIT model ...")
-        model = VitClassificationModel(num_classes=args.num_classes,
+        model = VitClassificationModel(config=config,
+                                       num_classes=args.num_classes,
                                        pre_process=pre_process,
                                        post_process=post_process)
     elif args.vision_backbone_type == 'mit':

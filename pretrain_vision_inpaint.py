@@ -5,23 +5,27 @@
 import torch
 import torch.nn.functional as F
 from functools import partial
-from megatron import get_args, get_timers, print_rank_0, print_rank_last
+from megatron.training import get_args, get_timers, print_rank_0, print_rank_last
 from megatron.core.enums import ModelType
-from megatron.data.vit_dataset import build_train_valid_datasets
-from megatron.model.vision.inpainting import VitInpaintingModel
-from megatron.model.vision.inpainting import MitInpaintingModel
+from megatron.legacy.data.vit_dataset import build_train_valid_datasets
+from megatron.legacy.model.vision.inpainting import VitInpaintingModel
+from megatron.legacy.model.vision.inpainting import MitInpaintingModel
 from megatron.training import pretrain
-from megatron.utils import average_losses_across_data_parallel_group
-from tasks.vision.metrics import SSIM, PSNR
+from megatron.training.utils import average_losses_across_data_parallel_group
+from tasks.vision.segmentation.metrics import SSIM, PSNR
+from megatron.training.arguments import core_transformer_config_from_args
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
     args = get_args()
+    config = core_transformer_config_from_args(args)
     if args.vision_backbone_type == 'vit':
-        model = VitInpaintingModel(pre_process=pre_process,
+        model = VitInpaintingModel(config=config,
+                                   pre_process=pre_process,
                                    post_process=post_process)
     elif args.vision_backbone_type == 'mit':
-        model = MitInpaintingModel(pre_process=pre_process,
+        model = MitInpaintingModel(config=config,
+                                   pre_process=pre_process,
                                    post_process=post_process)
     else:
         raise Exception('{} vision backbone is not supported.'.format(
@@ -39,7 +43,7 @@ def get_batch(data_iterator):
     return images, masks
 
 
-def loss_func(images, masks, masked_images, outputs, collect_data=False):
+def loss_func(images, masks, masked_images, outputs, non_loss_data=False):
     outputs = outputs.contiguous().float()
     masks_flip = 1-masks
     flip_masked_outputs = outputs.masked_fill(masks_flip.bool(), 0)
@@ -48,7 +52,7 @@ def loss_func(images, masks, masked_images, outputs, collect_data=False):
     ssim_fun = SSIM()
     psnr_fun = PSNR()
 
-    if not collect_data:
+    if not non_loss_data:
         mask_count = torch.count_nonzero(masks)
         loss = F.mse_loss(
             flip_masked_outputs,

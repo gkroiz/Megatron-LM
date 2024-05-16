@@ -6,4 +6,4 @@ build
 *~
 slurm*
 logs
-*.swp
+.vscode

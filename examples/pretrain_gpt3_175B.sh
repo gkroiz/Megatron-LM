@@ -41,22 +41,21 @@ options=" \
 	--save-interval 1000 \
 	--save <PATH TO CHECKPOINTS DIRECTORY> \
 	--load <PATH TO CHECKPOINTS DIRECTORY> \
-        --split 98,2,0 \
-        --clip-grad 1.0 \
+	--split 98,2,0 \
+	--clip-grad 1.0 \
 	--weight-decay 0.1 \
 	--adam-beta1 0.9 \
 	--adam-beta2 0.95 \
 	--init-method-std 0.006 \
 	--tensorboard-dir <TENSORBOARD DIRECTORY> \
-        --fp16 \
-	--activations-checkpoint-method uniform "
+	--fp16 "
 
 
 run_cmd="python -u ${DIR}/pretrain_gpt.py $@ ${options}"
 
 
 srun -l \
-     --container-image "nvcr.io/nvidia/pytorch:20.12-py3" \
+     --container-image "nvcr.io/nvidia/pytorch:24.01-py3" \
      --container-mounts "<DIRECTORIES TO MOUNT>" \
      --output=$DIR/logs/%x_%j_$DATETIME.log sh -c "${run_cmd}"
 

@@ -10,18 +10,20 @@ import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),
                                              os.path.pardir, os.path.pardir)))
-from megatron import get_args
-from megatron import get_timers
-from megatron import get_tokenizer
-from megatron import print_rank_0
+from megatron.training import get_args
+from megatron.training import get_timers
+from megatron.training import get_tokenizer
+from megatron.training import print_rank_0
 from megatron.core import mpu
-from megatron.data.blendable_dataset import BlendableDataset
-from megatron.data.gpt_dataset import build_train_valid_test_datasets
-from megatron.model import GPTModel
+from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
+from megatron.core.datasets.blended_megatron_dataset_config import GPTDatasetConfig
+from megatron.core.datasets.gpt_dataset import GPTDataset
+from megatron.core.datasets.utils import get_blend_from_list
+from megatron.legacy.model import GPTModel
 from megatron.core.enums import ModelType
 from megatron.training import pretrain
-from megatron.utils import get_ltor_masks_and_position_ids
-from megatron.utils import average_losses_across_data_parallel_group
+from megatron.training.utils import get_ltor_masks_and_position_ids
+from megatron.training.utils import average_losses_across_data_parallel_group
 
 def model_provider(pre_process=True, post_process=True):
     """Build the model."""
@@ -101,24 +103,34 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
 
     print_rank_0('> building train, validation, and test datasets '
                  'for GPT ...')
-    train_ds, valid_ds1, test_ds = build_train_valid_test_datasets(
-        data_prefix=args.data_path,
-        data_impl=args.data_impl,
-        splits_string=args.split,
-        train_valid_test_num_samples=train_val_test_num_samples,
-        seq_length=args.seq_length,
-        seed=args.seed,
-        skip_warmup=(not args.mmap_warmup))
+    train_ds, _, test_ds = BlendedMegatronDatasetBuilder(
+        GPTDataset,
+        train_val_test_num_samples,
+        lambda: True,
+        GPTDatasetConfig(
+            blend=get_blend_from_list(args.data_path),
+            split=args.split,
+            random_seed=args.seed,
+            sequence_length=args.seq_length,
+            path_to_cache=args.data_cache_path,
+            return_document_ids=False
+        )
+    ).build()
     print_rank_0("> finished creating finetuning GPT datasets ...")
 
-    _, valid_ds, _ = build_train_valid_test_datasets(
-        data_prefix=args.data_path2,
-        data_impl="mmap",
-        splits_string="98,2,0",
-        train_valid_test_num_samples=train_val_test_num_samples,
-        seq_length=2048,
-        seed=1234,
-        skip_warmup=(not args.mmap_warmup))
+    _, valid_ds, _ = BlendedMegatronDatasetBuilder(
+        GPTDataset,
+        train_val_test_num_samples,
+        lambda: True,
+        GPTDatasetConfig(
+            blend=get_blend_from_list(args.data_path2),
+            split="98,2,0",
+            random_seed=1234,
+            sequence_length=2048,
+            path_to_cache=args.data_cache_path,
+            return_document_ids=False
+        )
+    ).build()
     print_rank_0("> finished creating pretrained GPT datasets ...")
 
     return train_ds, valid_ds, test_ds
